@@ -1,6 +1,6 @@
 'use strict';
 const $ = id => document.getElementById(id);
-const state = {file: null, sheets: [], items: [], result: null, working: false};
+const state = {file: null, sheets: [], items: [], issues: [], result: null, working: false, validationVersion: 0};
 const fields = {material: '재질', spec: '규격', length: '길이 (mm)', quantity: '수량'};
 const colors = ['#087f6b', '#2f9e8c', '#59b5a2', '#80c9b8', '#397f99', '#63a2b9'];
 const fmt = value => Number(value).toLocaleString('ko-KR', {maximumFractionDigits: 3});
@@ -25,7 +25,13 @@ async function responseError(response) {
 }
 async function api(path, options = {}) {
   const response = await fetch(path, options);
-  if (!response.ok) throw new Error(await responseError(response));
+  if (!response.ok) {
+    let data;
+    try { data = await response.json(); } catch { data = {detail: `요청 실패 (${response.status})`}; }
+    const failure = new Error(typeof data.detail === 'string' ? data.detail : '입력값을 확인해 주세요.');
+    failure.data = data;
+    throw failure;
+  }
   return response.json();
 }
 function clearResults() {
@@ -37,7 +43,14 @@ function clearResults() {
   $('step3').classList.remove('current');
 }
 function clearBOM() {
+  state.validationVersion++;
   state.items = [];
+  state.validationPending = false;
+  state.eligibleRows = 0;
+  state.exclusionToken = null;
+  state.issues = [];
+  $('issues-section').hidden = true;
+  $('exclude-invalid').checked = false;
   $('bom-section').hidden = true;
   $('optimize').disabled = true;
   $('calculate-hint').textContent = 'BOM 데이터를 먼저 불러와 주세요.';
@@ -53,6 +66,7 @@ function sheetForm() {
   const form = fileForm();
   form.append('sheet', $('sheet').value);
   form.append('header_row', $('header-row').value);
+  form.append('kerf', $('kerf').value);
   return form;
 }
 function renderMapping(headers, mapping) {
@@ -85,15 +99,14 @@ async function loadPreview() {
   form.append('mapping', JSON.stringify(mapping));
   const data = await api('/api/preview', {method: 'POST', body: form});
   if (data.errors.length) throw new Error('BOM의 다음 오류를 수정한 후 다시 업로드해 주세요. 일부 행만 계산하지 않습니다.\n' +
-    data.errors.map(item => `${item.row}행: ${item.message}`).join('\n'));
+    data.errors.map(item => `${item.row}행 / ${item.title || '번호 없음'} / ${item.spec} / ${item.length}mm: ${item.message}`).join('\n'));
   state.items = data.items;
   const count = data.items.reduce((sum, item) => sum + item.quantity, 0);
   $('bom-count').textContent = `${fmt(data.items.length)}행 · ${fmt(count)}개`;
-  $('bom-body').innerHTML = data.items.slice(0, 100).map((item, index) => `<tr><td>${index + 1}</td><td>${esc(item.material)}</td><td>${esc(item.spec)}</td><td class="numeric">${fmt(item.length)}</td><td class="numeric">${fmt(item.quantity)}</td></tr>`).join('');
-  $('bom-more').textContent = data.items.length > 100 ? `화면에는 첫 100행을 표시합니다. 전체 ${fmt(data.items.length)}행이 계산에 사용됩니다.` : '모든 BOM 행이 계산에 사용됩니다. 길이 단위: mm';
+  $('bom-body').innerHTML = data.items.slice(0, 100).map((item, index) => `<tr><td>${item.source_row || index + 1}</td><td>${esc(item.title)}</td><td>${esc(item.material)}</td><td>${esc(item.spec)}</td><td class="numeric">${fmt(item.length)}</td><td class="numeric">${fmt(item.quantity)}</td></tr>`).join('');
+  $('bom-more').textContent = `${data.items.length > 100 ? '화면에는 첫 100행을 표시합니다. ' : ''}빈 행 및 합계 행을 제외했습니다. ${data.skipped_rows?.map(r => `${r.row}행: ${r.reason}`).join(' / ') || ''} 길이 단위: mm`;
   $('bom-section').hidden = false;
-  $('optimize').disabled = false;
-  $('calculate-hint').textContent = `${fmt(count)}개 부재 준비 완료 · 조건을 확인하고 최적화를 시작하세요.`;
+  applyValidation(data);
   $('step2').classList.add('current');
 }
 async function loadFile(file) {
@@ -160,21 +173,21 @@ $('preview').addEventListener('click', async () => {
   try { await loadPreview(); } catch (e) { error(e.message); }
   finally { busy(false); }
 });
-['stocks', 'kerf', 'time-limit'].forEach(id => $(id).addEventListener('input', clearResults));
+$('kerf').addEventListener('input', revalidate);
+$('time-limit').addEventListener('input', clearResults);
+$('exclude-invalid').addEventListener('change', () => { clearResults(); updateCalculateButton(); });
 $('optimize').addEventListener('click', async () => {
   if (state.working || !state.items.length) return;
   clearError(); clearResults();
-  const stocks = $('stocks').value.split(/[,;\s]+/).filter(Boolean);
   const kerf = $('kerf').value;
-  if (!stocks.length || stocks.some(s => !Number.isFinite(Number(s)) || Number(s) <= 30)) return error('발주 길이는 30mm보다 큰 숫자로 입력해 주세요. 예: 6000, 9000, 12000');
   if (kerf.trim() === '' || !Number.isFinite(Number(kerf)) || Number(kerf) < 0 || Number(kerf) > 100) return error('절단날 손실은 0~100mm로 입력해 주세요.');
   busy(true, '더 효율적인 절단 조합을 찾고 있습니다', `최대 ${$('time-limit').value}초 동안 재질·규격별로 계산합니다. 잠시만 기다려 주세요.`);
   try {
     state.result = await api('/api/optimize', {method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({items: state.items, stock_lengths: stocks, kerf, time_limit: Number($('time-limit').value)})});
+      body: JSON.stringify({items: state.items, kerf, time_limit: Number($('time-limit').value), exclude_invalid: $('exclude-invalid').checked, exclusion_token: state.exclusionToken})});
     renderResult();
     $('results-section').scrollIntoView({behavior: 'smooth', block: 'start'});
-  } catch (e) { error(e.message); }
+  } catch (e) { if (e.data?.issues) applyValidation(e.data); error(e.message); }
   finally { busy(false); }
 });
 function metric(id, value, unit) { $(id).innerHTML = `${fmt(value)}<em>${esc(unit)}</em>`; }
@@ -193,10 +206,12 @@ function renderResult() {
   $('metric-time').textContent = `${s.elapsed_seconds}초 소요 · 수량 검증 완료`;
   $('orders-count').textContent = result.orders.length;
   $('patterns-count').textContent = result.patterns.length;
-  $('orders-body').innerHTML = result.orders.map(o => `<tr><td>${esc(o.material)}</td><td>${esc(o.spec)}</td><td class="numeric">${fmt(o.stock_length)}</td><td class="numeric"><strong>${fmt(o.quantity)}</strong></td><td class="numeric">${fmt(o.total_length)}</td><td class="numeric">${fmt(o.loss_rate)}%</td></tr>`).join('');
+  $('orders-body').innerHTML = result.orders.map(o => `<tr><td>${esc(o.material_type)}</td><td>${esc(o.material)}</td><td>${esc(o.spec)}</td><td class="numeric">${fmt(o.stock_length)}</td><td class="numeric"><strong>${fmt(o.quantity)}</strong></td><td class="numeric">${fmt(o.total_length)}</td><td class="numeric">${fmt(o.loss_rate)}%</td></tr>`).join('');
   $('patterns-list').innerHTML = result.patterns.map(patternHTML).join('');
-  $('result-settings').textContent = `발주 길이 ${result.settings.stock_lengths.map(fmt).join(', ')}mm · 날 손실 ${fmt(result.settings.kerf)}mm/개 · 잔재 > 30mm · 총 제품 ${fmt(s.total_parts_length)}mm · 총 날 손실 ${fmt(s.total_kerf_loss)}mm`;
+  $('result-settings').textContent = `${Object.entries(result.settings.stock_lengths_by_type).map(([k,v]) => `${k}: ${v.map(fmt).join(', ')}mm`).join(' / ')} · 날 손실 ${fmt(result.settings.kerf)}mm/개 · 잔재 > 30mm · 총 제품 ${fmt(s.total_parts_length)}mm · 총 날 손실 ${fmt(s.total_kerf_loss)}mm`;
   $('solver-status').innerHTML = result.statuses.map(r => `<li>${esc(r.material)} / ${esc(r.spec)} — ${esc(r.detail)}</li>`).join('');
+  $('excluded-summary').textContent = result.excluded.length ? `${result.excluded.length}행 · ${fmt(s.excluded_piece_count)}개 제외 / 입력 ${fmt(s.input_piece_count)}개 = 생산 ${fmt(s.piece_count)}개 + 제외 ${fmt(s.excluded_piece_count)}개. 사용자가 제외를 선택한 부재입니다.` : '계산 제외 부재 없음 · 모든 입력 부재를 계산했습니다.';
+  $('excluded-body').innerHTML = issueRows(result.excluded);
   selectTab('orders');
 }
 function patternHTML(p) {
@@ -209,7 +224,7 @@ function patternHTML(p) {
   });
   const kerfWidth = p.kerf_loss / p.stock_length * 100, restWidth = p.remnant / p.stock_length * 100;
   bars += `<div class="cut-segment kerf-segment" style="width:${kerfWidth}%" title="날 손실 ${fmt(p.kerf_loss)}mm"></div><div class="cut-segment remnant-segment" style="width:${restWidth}%" title="잔재 ${fmt(p.remnant)}mm">${restWidth > 7 ? fmt(p.remnant) : ''}</div>`;
-  return `<article class="pattern"><div class="pattern-heading"><div><span class="pattern-id">${esc(p.id)}</span><strong>${esc(p.material)} / ${esc(p.spec)}</strong><small>원자재 ${fmt(p.stock_length)}mm</small></div><span class="repeat-badge">× ${p.bar_count}본 반복</span></div><div class="cut-bar" role="img" aria-label="${esc(p.id)} 절단 조합: ${p.cuts.map(c => `${fmt(c.length)}mm ${c.quantity}개`).join(', ')}, 잔재 ${fmt(p.remnant)}mm">${bars}</div><div class="pattern-detail"><div class="cut-legend">${legend}</div><span class="pattern-totals">날 손실 ${fmt(p.kerf_loss)} · 잔재 <strong>${fmt(p.remnant)}mm</strong> · 로스 ${fmt(p.loss_rate)}%</span></div></article>`;
+  return `<article class="pattern"><div class="pattern-heading"><div><span class="pattern-id">${esc(p.id)}</span><strong>${esc(p.material_type)} / ${esc(p.material)} / ${esc(p.spec)}</strong><small>원자재 ${fmt(p.stock_length)}mm</small></div><span class="repeat-badge">× ${p.bar_count}본 반복</span></div><div class="cut-bar" role="img" aria-label="${esc(p.id)} 절단 조합: ${p.cuts.map(c => `${fmt(c.length)}mm ${c.quantity}개`).join(', ')}, 잔재 ${fmt(p.remnant)}mm">${bars}</div><div class="pattern-detail"><div class="cut-legend">${legend}</div><span class="pattern-totals">날 손실 ${fmt(p.kerf_loss)} · 잔재 <strong>${fmt(p.remnant)}mm</strong> · 로스 ${fmt(p.loss_rate)}%</span></div></article>`;
 }
 function selectTab(name) {
   for (const tab of ['orders', 'patterns']) {
@@ -235,3 +250,67 @@ document.querySelectorAll('[data-format]').forEach(button => button.addEventList
   } catch (e) { error(e.message); }
   finally { busy(false); }
 }));
+
+function issueRows(issues) {
+  return issues.map(e => `<tr><td>${e.row}</td><td>${esc(e.title || '—')}</td><td>${esc(e.material_type)}</td><td>${esc(e.spec)}</td><td class="numeric">${fmt(e.length)}</td><td>${fmt(e.quantity)}</td><td>${e.allowed_lengths.map(fmt).join(', ') || '—'}</td><td>${esc(e.reason)}</td></tr>`).join('');
+}
+function applyValidation(data) {
+  state.validationPending = false;
+  state.exclusionToken = data.exclusion_token;
+  state.issues = data.issues || [];
+  state.eligibleRows = data.eligible_rows ?? state.items.length - state.issues.length;
+  $('exclude-invalid').checked = false;
+  $('issues-section').hidden = !state.issues.length;
+  $('issues-count').textContent = `${state.issues.length}행 · ${fmt(state.issues.reduce((n, e) => n + e.quantity, 0))}개`;
+  $('issues-body').innerHTML = issueRows(state.issues);
+  updateCalculateButton();
+}
+function updateCalculateButton() {
+  const allowed = state.items.length && state.eligibleRows > 0 && !state.validationPending && (!state.issues.length || $('exclude-invalid').checked);
+  $('optimize').disabled = !allowed;
+  $('calculate-hint').textContent = !state.items.length ? 'BOM 데이터를 먼저 불러와 주세요.' : state.validationPending ? '조건을 다시 확인하고 있습니다.' : state.eligibleRows === 0 ? '계산 가능한 정상 부재가 없습니다. 예외 목록을 확인해 주세요.' : state.issues.length && !$('exclude-invalid').checked ? '예외 목록을 확인한 뒤 제외 여부를 선택해 주세요.' : `${state.eligibleRows}개 정상 행 준비 완료${state.issues.length ? ` · 예외 ${state.issues.length}행 제외 선택` : ''}`;
+}
+async function revalidate() {
+  clearResults();
+  if (!state.items.length) return;
+  const version = ++state.validationVersion;
+  state.validationPending = true;
+  $('exclude-invalid').checked = false;
+  updateCalculateButton();
+  try {
+    const data = await api('/api/validate', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({items: state.items, kerf: $('kerf').value})});
+    if (version !== state.validationVersion) return;
+    state.validationPending = false;
+    applyValidation(data);
+  } catch (e) {
+    if (version === state.validationVersion) { $('optimize').disabled = true; error(e.message); }
+  }
+}
+function renderSettings(settings) {
+  const entries = Object.entries(settings.stock_lengths_by_type);
+  $('stock-summary').innerHTML = entries.map(([kind, lengths]) => `<div><strong>${esc(kind)}</strong><span>${lengths.map(fmt).join(' / ')} mm</span></div>`).join('');
+  $('stock-editors').replaceChildren();
+  for (const [kind, lengths] of entries) {
+    const label = document.createElement('label'); label.className = 'field-label'; label.textContent = kind;
+    const input = document.createElement('input'); input.dataset.materialType = kind;
+    input.value = lengths.join(', '); input.setAttribute('aria-label', `${kind} 발주 길이`);
+    label.append(input); $('stock-editors').append(label);
+  }
+}
+$('save-settings').addEventListener('click', async () => {
+  if (state.working) return;
+  clearError(); busy(true, '자재 종류별 발주 길이를 저장하고 있습니다');
+  try {
+    const stock_lengths_by_type = {};
+    document.querySelectorAll('[data-material-type]').forEach(input => {
+      stock_lengths_by_type[input.dataset.materialType] = input.value.split(/[,;\s]+/).filter(Boolean);
+    });
+    const saved = await api('/api/settings', {method: 'PUT', headers: {'Content-Type': 'application/json', 'X-Admin-Password': $('admin-password').value}, body: JSON.stringify({stock_lengths_by_type})});
+    $('admin-password').value = '';
+    renderSettings(saved);
+    $('settings-status').textContent = '저장 완료 · 서버를 재시작해도 유지됩니다.';
+    await revalidate();
+  } catch (e) { error(e.message); }
+  finally { busy(false); }
+});
+api('/api/settings').then(renderSettings).catch(e => error(e.message));

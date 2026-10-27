@@ -6,6 +6,7 @@ from decimal import Decimal
 from ortools.sat.python import cp_model
 
 from .models import OptimizeRequest
+from .materials import classify_material
 
 SCALE = 1000  # 0.001 mm; a 30.000 mm remainder is forbidden.
 MIN_REMAINDER = 30 * SCALE + 1
@@ -94,7 +95,7 @@ def solve_group(lengths, demands, stocks, kerf, seconds):
     return result, 'OPTIMAL' if proven else 'FEASIBLE', '최적해 증명 완료' if proven else '시간 내 최선의 조합 (최적해 미확정)', round(solver.best_objective_bound, 3)
 
 
-def optimize(request: OptimizeRequest):
+def optimize(request: OptimizeRequest, stock_lengths_by_type=None):
     started = time.monotonic()
     if sum(item.quantity for item in request.items) > 5000:
         raise ValueError('총 부재 수량은 5,000개 이하여야 합니다.')
@@ -103,8 +104,16 @@ def optimize(request: OptimizeRequest):
         grouped[(item.material, item.spec)][units(item.length)] += item.quantity
     if len(grouped) > 100:
         raise ValueError('재질·규격 그룹은 최대 100개까지 지원합니다.')
-    stocks, kerf = [units(s) for s in request.stock_lengths], units(request.kerf)
+    if stock_lengths_by_type is None and request.stock_lengths is None:
+        raise ValueError('발주 길이 설정이 필요합니다.')
+    kerf = units(request.kerf)
+
+    def group_stocks(spec):
+        values = stock_lengths_by_type[classify_material(spec)] if stock_lengths_by_type is not None else request.stock_lengths
+        return [units(s) for s in values]
+
     for (material, spec), demand in grouped.items():
+        stocks = group_stocks(spec)
         for length in demand:
             if length + kerf + MIN_REMAINDER > max(stocks):
                 raise ValueError(f'{material} / {spec}: {mm(length):g}mm 부재는 발주 길이에 들어가지 않습니다. '
@@ -112,6 +121,8 @@ def optimize(request: OptimizeRequest):
     orders, patterns, statuses = [], [], []
     total_stock = total_parts = total_kerf = total_remnant = 0
     for index, ((material, spec), demand) in enumerate(sorted(grouped.items())):
+        stocks = group_stocks(spec)
+        kind = classify_material(spec) or '미지원 자재'
         lengths = sorted(demand, reverse=True)
         demands = [demand[v] for v in lengths]
         remaining = max(0, request.time_limit - (time.monotonic() - started))
@@ -121,7 +132,8 @@ def optimize(request: OptimizeRequest):
         actual = [sum(bar['counts'][i] for bar in bars) for i in range(len(lengths))]
         if actual != demands:
             raise RuntimeError('부재 수량 검증 실패')
-        statuses.append({'material': material, 'spec': spec, 'status': status, 'detail': detail})
+        statuses.append({'material': material, 'spec': spec, 'material_type': kind,
+                         'allowed_lengths': [mm(s) for s in stocks], 'status': status, 'detail': detail})
         identical = Counter((b['stock'], tuple(b['counts'])) for b in bars)
         by_stock = defaultdict(lambda: {'quantity': 0, 'parts_length': 0, 'kerf_loss': 0, 'remnant': 0})
         for (stock, counts), repeats in sorted(identical.items(), reverse=True):
@@ -131,7 +143,7 @@ def optimize(request: OptimizeRequest):
             remnant = stock - parts - loss
             if remnant < MIN_REMAINDER or stock not in stocks:
                 raise RuntimeError('잔재 또는 발주 길이 검증 실패')
-            patterns.append({'id': f'CP-{len(patterns) + 1:03d}', 'material': material, 'spec': spec,
+            patterns.append({'id': f'CP-{len(patterns) + 1:03d}', 'material': material, 'spec': spec, 'material_type': kind,
                              'stock_length': mm(stock), 'bar_count': repeats,
                              'cuts': [{'length': mm(l), 'quantity': q} for l, q in zip(lengths, counts) if q],
                              'piece_count': piece_count, 'parts_length': mm(parts), 'kerf_loss': mm(loss),
@@ -144,7 +156,7 @@ def optimize(request: OptimizeRequest):
             total_kerf += loss * repeats
             total_remnant += remnant * repeats
         for stock, row in sorted(by_stock.items()):
-            orders.append({'material': material, 'spec': spec, 'stock_length': mm(stock),
+            orders.append({'material': material, 'spec': spec, 'material_type': kind, 'stock_length': mm(stock),
                            'quantity': row['quantity'], 'total_length': mm(stock * row['quantity']),
                            'parts_length': mm(row['parts_length']), 'kerf_loss': mm(row['kerf_loss']),
                            'remnant': mm(row['remnant']),
@@ -156,7 +168,10 @@ def optimize(request: OptimizeRequest):
                         'loss_rate': round(100 * (total_stock - total_parts) / total_stock, 2),
                         'optimal': all(s['status'] == 'OPTIMAL' for s in statuses),
                         'elapsed_seconds': round(time.monotonic() - started, 2)},
-            'settings': {'stock_lengths': [float(s) for s in request.stock_lengths], 'kerf': float(request.kerf),
+            'settings': {'stock_lengths': sorted({float(s) for s in request.stock_lengths}) if stock_lengths_by_type is None
+                         else sorted({float(s) for values in stock_lengths_by_type.values() for s in values}),
+                         'stock_lengths_by_type': {k: [float(s) for s in v] for k, v in stock_lengths_by_type.items()}
+                         if stock_lengths_by_type is not None else {}, 'kerf': float(request.kerf),
                          'minimum_remnant_exclusive': 30, 'time_limit': request.time_limit,
                          'objective': '발주 본수 최소 → 총 발주 길이 최소 (동일 본수에서 로스 최소)'},
             'orders': orders, 'patterns': patterns, 'statuses': statuses,

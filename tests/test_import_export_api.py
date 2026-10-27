@@ -64,7 +64,7 @@ def test_entire_workflow_sample_import_optimize_exports():
     preview = response.json()
     assert preview['errors'] == []
     assert len(preview['items']) == 7
-    response = client.post('/api/optimize', json={'items': preview['items'], 'stock_lengths': [6000, 9000, 12000], 'kerf': 3, 'time_limit': 5})
+    response = client.post('/api/optimize', json={'items': preview['items'], 'kerf': 3, 'time_limit': 5})
     assert response.status_code == 200
     plan = response.json()
     assert plan['summary']['piece_count'] == 48
@@ -73,7 +73,7 @@ def test_entire_workflow_sample_import_optimize_exports():
     xlsx = client.get(f"/api/results/{plan['job_id']}.xlsx")
     assert xlsx.status_code == 200
     wb = load_workbook(io.BytesIO(xlsx.content), data_only=False)
-    assert wb.sheetnames == ['발주 원자재', 'CUTTING PLAN', 'BOM', '계산 설정']
+    assert wb.sheetnames == ['발주 원자재', 'CUTTING PLAN', 'BOM', '계산 설정', '계산 제외 부재']
     assert sum(row[3] for row in wb['발주 원자재'].iter_rows(min_row=2, values_only=True)) == 12
     assert sum(row[3] for row in wb['BOM'].iter_rows(min_row=2, values_only=True)) == 48
     assert all(row[9] > 30 for row in wb['CUTTING PLAN'].iter_rows(min_row=2, values_only=True))
@@ -89,8 +89,8 @@ def test_entire_workflow_sample_import_optimize_exports():
 
 
 def test_formula_injection_protection():
-    response = client.post('/api/optimize', json={'items': [{'material': '=1+1', 'spec': '@SUM(1)', 'length': 2000, 'quantity': 1}],
-                                                 'stock_lengths': [6000], 'kerf': 0, 'time_limit': 1})
+    response = client.post('/api/optimize', json={'items': [{'material': '=1+1', 'spec': 'H-300', 'length': 2000, 'quantity': 1}],
+                                                 'kerf': 0, 'time_limit': 1})
     assert response.status_code == 200
     wb = load_workbook(io.BytesIO(client.get(f"/api/results/{response.json()['job_id']}.xlsx").content))
     assert wb['발주 원자재']['A2'].data_type == 's'

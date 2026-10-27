@@ -65,18 +65,22 @@ def export_xlsx(plan):
     wb.remove(wb.active)
     styled_sheet(wb, '발주 원자재',
                  ['재질', '규격', '발주 길이 (mm)', '발주 수량 (본)', '총 발주 길이 (mm)', '제품 길이 (mm)',
-                  '절단 손실 (mm)', '잔재 합계 (mm)', '로스율 (%)'],
+                  '절단 손실 (mm)', '잔재 합계 (mm)', '로스율 (%)', '자재 종류'],
                  [[o[k] for k in ('material', 'spec', 'stock_length', 'quantity', 'total_length', 'parts_length',
-                                 'kerf_loss', 'remnant', 'loss_rate')] for o in plan['orders']],
-                 [18, 30, 20, 18, 24, 22, 20, 22, 16])
+                                 'kerf_loss', 'remnant', 'loss_rate', 'material_type')] for o in plan['orders']],
+                 [18, 30, 20, 18, 24, 22, 20, 22, 16, 18])
     styled_sheet(wb, 'CUTTING PLAN',
                  ['패턴 ID', '재질', '규격', '원자재 길이 (mm)', '반복 본수', '절단 조합 (mm × 개/본)',
-                  '제품 개수/본', '제품 길이/본 (mm)', '절단 손실/본 (mm)', '잔재/본 (mm)', '로스율 (%)'],
+                  '제품 개수/본', '제품 길이/본 (mm)', '절단 손실/본 (mm)', '잔재/본 (mm)', '로스율 (%)', '자재 종류'],
                  [[p['id'], p['material'], p['spec'], p['stock_length'], p['bar_count'], cut_text(p['cuts']),
-                   p['piece_count'], p['parts_length'], p['kerf_loss'], p['remnant'], p['loss_rate']]
-                  for p in plan['patterns']], [16, 18, 30, 22, 15, 65, 16, 24, 24, 20, 16])
-    styled_sheet(wb, 'BOM', ['재질', '규격', '길이 (mm)', '수량'],
-                 [[i['material'], i['spec'], float(i['length']), i['quantity']] for i in plan['bom']], [20, 35, 20, 15])
+                   p['piece_count'], p['parts_length'], p['kerf_loss'], p['remnant'], p['loss_rate'], p['material_type']]
+                  for p in plan['patterns']], [16, 18, 30, 22, 15, 65, 16, 24, 24, 20, 16, 18])
+    styled_sheet(wb, 'BOM', ['재질', '규격', '길이 (mm)', '수량', '자재 종류', '원본 행', '부재 번호 (TITLE)',
+                            '부재 분류 (ITEM)', 'WEIGHT.KG', 'PAINT.M', '계산 여부'],
+                 [[i['material'], i['spec'], float(i['length']), i['quantity'], i.get('material_type', ''),
+                   i.get('source_row'), i.get('title', ''), i.get('item_class', ''), i.get('weight', ''),
+                   i.get('paint_area', ''), '포함' if i.get('included', True) else '제외'] for i in plan['bom']],
+                 [20, 35, 20, 15, 18, 12, 24, 24, 18, 18, 15])
     s, cfg = plan['summary'], plan['settings']
     settings = [['발주 길이 (mm)', ', '.join(f'{x:g}' for x in cfg['stock_lengths'])],
                 ['절단날 손실 (mm/개)', cfg['kerf']], ['잔재 규칙', '각 원자재 잔재 > 30mm (30mm 이하 불가)'],
@@ -87,7 +91,15 @@ def export_xlsx(plan):
                 ['절단 손실 산식', '부재 1개당 1회 절단; 길이 × 수량 + 날 손실 × 수량 + 잔재 = 원자재 길이'],
                 ['생성 시각 (UTC)', datetime.now(timezone.utc).isoformat(timespec='seconds')]]
     settings.extend([f"{r['material']} / {r['spec']}", r['detail']] for r in plan['statuses'])
+    settings.extend([f'{kind} 발주 길이 (mm)', ', '.join(f'{v:g}' for v in lengths)]
+                    for kind, lengths in cfg.get('stock_lengths_by_type', {}).items())
+    settings.append(['계산 제외 부재 수량', s.get('excluded_piece_count', 0)])
     styled_sheet(wb, '계산 설정', ['항목', '값'], settings, [32, 110])
+    if 'excluded' in plan:
+        styled_sheet(wb, '계산 제외 부재', ['원본 행', '부재 번호', '자재 종류', '재질', '규격', '길이 (mm)', '수량', '허용 발주 길이 (mm)', '제외 원인'],
+                     [[e['row'], e['title'], e['material_type'], e['material'], e['spec'], float(e['length']),
+                       e['quantity'], ', '.join(f'{v:g}' for v in e['allowed_lengths']), e['reason']]
+                      for e in plan['excluded']], [12, 24, 18, 18, 32, 20, 12, 45, 65])
     output = io.BytesIO()
     wb.save(output)
     return output.getvalue()
@@ -120,12 +132,14 @@ def export_pdf(plan):
     story = [p('STEEL PLAN  /  철골 발주 및 절단 계획', 'KTitle'), Spacer(1, 12),
              p(f"발주 {s['bar_count']}본  ·  부재 {s['piece_count']}개  ·  전체 로스율 {s['loss_rate']}%  ·  "
                + ('최적해 증명 완료' if s['optimal'] else '실행 가능 해 / 최적해 미확정')),
-             p(f"발주 길이: {', '.join(f'{x:g}' for x in cfg['stock_lengths'])}mm / 날 손실: {cfg['kerf']:g}mm/개 / 잔재: 각 본 30mm 초과"),
+             p(f"날 손실: {cfg['kerf']:g}mm/개 / 잔재: 각 본 30mm 초과 / 계산 제외: {s.get('excluded_piece_count', 0)}개"),
+             *[p(f"{kind} 발주 길이: {', '.join(f'{x:g}' for x in lengths)}mm")
+               for kind, lengths in cfg.get('stock_lengths_by_type', {}).items()],
              p('최적화 순서: 발주 본수 최소 → 총 발주 길이 최소. 로스율은 절단 손실과 잔재를 포함합니다.'),
              p('01  발주 원자재 목록', 'KHead'),
-             table(['재질', '규격', '발주 길이 mm', '수량 본', '총 길이 mm', '잔재 합계 mm', '로스율 %'],
-                   [[o['material'], o['spec'], f"{o['stock_length']:g}", o['quantity'], f"{o['total_length']:g}",
-                     f"{o['remnant']:g}", o['loss_rate']] for o in plan['orders']], [80, 190, 100, 65, 115, 115, 80]),
+             table(['종류', '재질', '규격', '발주 길이 mm', '수량 본', '총 길이 mm', '잔재 합계 mm', '로스율 %'],
+                   [[o['material_type'], o['material'], o['spec'], f"{o['stock_length']:g}", o['quantity'], f"{o['total_length']:g}",
+                     f"{o['remnant']:g}", o['loss_rate']] for o in plan['orders']], [55, 65, 165, 85, 60, 110, 110, 85]),
              p('02  CUTTING PLAN', 'KHead'), p('길이 및 잔재는 원자재 1본 기준입니다. 동일 조합은 반복 본수로 표시합니다.')]
     for pattern in plan['patterns']:
         width = 735
@@ -144,13 +158,22 @@ def export_pdf(plan):
         cursor += kerf_width
         drawing.add(Rect(cursor, 8, width - cursor, 23, fillColor=colors.HexColor('#e2e8e5'), strokeWidth=0))
         story.append(KeepTogether([
-            Spacer(1, 12), p(f"{pattern['id']}  |  {pattern['material']}  /  {pattern['spec']}  |  "
+            Spacer(1, 12), p(f"{pattern['id']}  |  {pattern['material_type']} / {pattern['material']} / {pattern['spec']}  |  "
                               f"{pattern['stock_length']:g}mm × {pattern['bar_count']}본", 'KHead'),
             drawing, p(cut_text(pattern['cuts']) + '  (mm × 개/본)'),
             p(f"제품 {pattern['piece_count']}개/본 · 날 손실 {pattern['kerf_loss']:g}mm · "
               f"잔재 {pattern['remnant']:g}mm · 로스율 {pattern['loss_rate']}%")]))
     story.extend([Spacer(1, 18), p('그룹별 계산 상태', 'KHead')])
     story.extend(p(f"{r['material']} / {r['spec']}: {r['detail']}") for r in plan['statuses'])
+    story.extend([Spacer(1, 12), p('03  계산 제외 부재', 'KHead')])
+    if plan.get('excluded'):
+        story.append(table(['행', '부재 번호', '종류 / 규격', '길이 mm / 수량', '허용 길이 mm / 원인'],
+                           [[e['row'], e['title'], f"{e['material_type']} / {e['spec']}",
+                             f"{e['length']} / {e['quantity']}개",
+                             ', '.join(f'{v:g}' for v in e['allowed_lengths']) + ' / ' + e['reason']]
+                            for e in plan['excluded']], [40, 100, 220, 105, 270]))
+    else:
+        story.append(p('계산 제외 부재 없음'))
 
     def footer(canvas, document):
         canvas.setFont(FONT, 8)

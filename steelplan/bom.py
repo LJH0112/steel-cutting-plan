@@ -8,16 +8,19 @@ from openpyxl import load_workbook
 from pydantic import ValidationError
 
 from .models import BOMItem, millimeters
+from .materials import compact
 
 MAX_UPLOAD = 10 * 1024 * 1024
 MAX_ROWS = 10000
 FIELDS = ('material', 'spec', 'length', 'quantity')
 ALIASES = {
-    'material': ['재질', '재료', '강종', '材質', 'material', 'grade', 'steelgrade'],
-    'spec': ['규격', '단면', '형강규격', '부재규격', 'spec', 'specification', 'section', 'size', 'profile'],
+    'material': ['재질', '재료', '강종', '材質', 'material', 'grade', 'steelgrade', 'matl'],
+    'spec': ['규격', '단면', '형강규격', '부재규격', 'spec', 'specification', 'section', 'size', 'profile', 'description'],
     'length': ['길이', '길이mm', '절단길이', '절단길이mm', '부재길이', 'length', 'lengthmm', 'cutlength'],
     'quantity': ['수량', '수량ea', '개수', '본수', '소요수량', 'qty', 'quantity', 'count', 'pcs'],
 }
+METADATA_ALIASES = {'item_class': ['item'], 'title': ['title'], 'weight': ['weightkg'], 'paint_area': ['paintm']}
+TOTAL_LABELS = {'합계', '총합계', '총계', '소계', 'total', 'grandtotal', 'subtotal'}
 
 
 def normalized(value):
@@ -60,7 +63,9 @@ def inspect_bom(data):
             sheets.append({'name': ws.title, 'header_row': header_row, 'headers': headers, 'mapping': mapping})
         if not sheets:
             raise ValueError('읽을 수 있는 시트가 없습니다.')
-        return {'sheets': sheets, 'suggested_sheet': max(sheets, key=lambda s: len(s['mapping']))['name']}
+        suggested = next((s for s in sheets if compact(s['name']).upper() == 'TSASSEMLIST'),
+                         max(sheets, key=lambda s: len(s['mapping'])))
+        return {'sheets': sheets, 'suggested_sheet': suggested['name']}
     finally:
         wb.close()
 
@@ -91,14 +96,30 @@ def parse_bom(data, sheet, header_row, mapping):
         if sheet not in wb.sheetnames:
             raise ValueError('선택한 시트가 없습니다.')
         ws = wb[sheet]
-        items, errors = [], []
-        for rownum, row in enumerate(ws.iter_rows(min_row=header_row + 1, max_row=header_row + MAX_ROWS + 1,
-                                                  max_col=max(mapping.values()) + 1, values_only=True), header_row + 1):
+        if ws.max_row and ws.max_row > header_row + MAX_ROWS:
+            raise ValueError('시트의 사용 범위가 10,000행을 초과합니다. 불필요한 행을 삭제해 주세요. 일부 데이터만 계산하지 않습니다.')
+        header = next(ws.iter_rows(min_row=header_row, max_row=header_row, max_col=100, values_only=True))
+        metadata = {name: matches[0] for name, aliases in METADATA_ALIASES.items()
+                    if len(matches := [i for i, cell in enumerate(header) if normalized(cell) in aliases]) == 1}
+        # Locate a labelled trailing total without hiding a part whose TITLE happens to be "TOTAL".
+        raw_rows = list(ws.iter_rows(min_row=header_row + 1, max_row=header_row + MAX_ROWS + 1,
+                                     max_col=max([*mapping.values(), *metadata.values()]) + 1, values_only=True))
+        populated = [i for i, row in enumerate(raw_rows) if any(c is not None and str(c).strip() for c in row)]
+        last_data_index = populated[-1] if populated else -1
+        items, errors, skipped_rows = [], [], []
+        for index, row in enumerate(raw_rows):
+            rownum = header_row + 1 + index
             values = {key: row[col] for key, col in mapping.items()}
-            if all(v is None or str(v).strip() == '' for v in values.values()):
+            if all(v is None or str(v).strip() == '' for v in row):
                 continue
             if rownum > header_row + MAX_ROWS:
                 raise ValueError('데이터 행은 최대 10,000행까지 읽을 수 있습니다.')
+            labels = [row[c] for c in set([mapping['material'], mapping['spec'], *metadata.values()])]
+            if index == last_data_index and any(normalized(v) in TOTAL_LABELS for v in labels):
+                # Require no real section, or no cutting length: a real part named TOTAL remains data.
+                if not compact(values['spec']) or normalized(values['spec']) in TOTAL_LABELS or not compact(values['length']):
+                    skipped_rows.append({'row': rownum, 'reason': '마지막 합계 행'})
+                    continue
             try:
                 for key in ('material', 'spec'):
                     if values[key] is None:
@@ -108,16 +129,21 @@ def parse_bom(data, sheet, header_row, mapping):
                 raw_qty = values['quantity']
                 if isinstance(raw_qty, bool):
                     raise ValueError('수량은 양의 정수여야 합니다.')
-                qty = Decimal(str(raw_qty).replace(',', '').strip())
+                qty = Decimal(re.sub(r'\s+', '', str(raw_qty)).replace(',', ''))
                 if not qty.is_finite() or not 0 < qty <= 5000 or qty != qty.to_integral_value():
                     raise ValueError('수량은 1~5,000 사이의 정수여야 합니다.')
                 values['quantity'] = int(qty)
+                values['source_row'] = rownum
+                values.update({name: re.sub(r'\s+', ' ', str(row[col])).strip() if row[col] is not None else ''
+                               for name, col in metadata.items()})
                 items.append(BOMItem(**values))
             except (ValueError, InvalidOperation, TypeError, ValidationError) as exc:
                 message = str(exc)
                 if isinstance(exc, ValidationError):
                     message = '; '.join(f"{e['loc'][0]}: {e['msg']}" for e in exc.errors())
-                errors.append({'row': rownum, 'message': message[:250]})
+                errors.append({'row': rownum, 'message': message[:250],
+                               'title': str(row[metadata['title']] or '').strip() if 'title' in metadata else '',
+                               'spec': str(values['spec'] or '').strip(), 'length': str(values['length'] or '')})
                 if len(errors) >= 50:
                     break
         if errors:
@@ -126,6 +152,6 @@ def parse_bom(data, sheet, header_row, mapping):
             raise ValueError('BOM 데이터가 없습니다. 시트와 헤더 행을 확인해 주세요.')
         if len(items) > 1000 or sum(i.quantity for i in items) > 5000:
             raise ValueError('BOM은 최대 1,000행, 총 5,000개 부재까지 지원합니다.')
-        return {'items': [i.model_dump(mode='json') for i in items], 'errors': []}
+        return {'items': [i.model_dump(mode='json') for i in items], 'errors': [], 'skipped_rows': skipped_rows}
     finally:
         wb.close()

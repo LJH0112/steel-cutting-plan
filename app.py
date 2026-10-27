@@ -1,13 +1,15 @@
 """Run: python -m uvicorn app:app --host 127.0.0.1 --port 8000."""
 import json
 import logging
+import os
+import secrets
 import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -15,11 +17,12 @@ from starlette.concurrency import run_in_threadpool
 
 from steelplan.bom import MAX_UPLOAD, inspect_bom, parse_bom, read_headers
 from steelplan.exports import export_pdf, export_xlsx, sample_xlsx
-from steelplan.models import OptimizeRequest
-from steelplan.optimizer import optimize
+from steelplan.models import OptimizeRequest, StockSettings
+from steelplan.planning import PlanningIssues, plan_by_material, validate_plan_input
+from steelplan.settings import load_settings, save_settings
 
 ROOT = Path(__file__).resolve().parent
-app = FastAPI(title='STEEL PLAN · 철골 절단 최적화', version='1.0.0')
+app = FastAPI(title='STEEL PLAN · 철골 절단 최적화', version='1.1.0')
 app.mount('/static', StaticFiles(directory=ROOT / 'static'), name='static')
 app.mount('/fonts', StaticFiles(directory=ROOT / 'assets/fonts'), name='fonts')
 RESULTS = OrderedDict()
@@ -44,10 +47,46 @@ def health():
     return {'status': 'ok'}
 
 
+def current_settings():
+    try:
+        return load_settings()
+    except (ValueError, OSError) as exc:
+        raise HTTPException(503, '관리자 발주 길이 설정을 읽을 수 없습니다. data/stock_settings.json을 확인해 주세요.') from exc
+
+
+@app.get('/api/settings')
+def settings():
+    return current_settings().model_dump(mode='json')
+
+
+@app.put('/api/settings')
+def update_settings(value: StockSettings, request: Request):
+    password = os.environ.get('STEELPLAN_ADMIN_PASSWORD', '')
+    supplied = request.headers.get('X-Admin-Password', '')
+    if password:
+        if not secrets.compare_digest(supplied.encode(), password.encode()):
+            raise HTTPException(403, '관리자 비밀번호가 올바르지 않습니다.')
+    elif not request.client or request.client.host not in ('127.0.0.1', '::1'):
+        raise HTTPException(403, '외부 접속에서 설정을 수정하려면 서버의 STEELPLAN_ADMIN_PASSWORD를 설정해 주세요.')
+    if request.headers.get('Sec-Fetch-Site') == 'cross-site':
+        raise HTTPException(403, '다른 사이트에서 관리자 설정을 변경할 수 없습니다.')
+    try:
+        save_settings(value)
+    except OSError as exc:
+        raise HTTPException(503, '설정 파일을 저장할 수 없습니다. data 폴더 쓰기 권한을 확인해 주세요.') from exc
+    return value.model_dump(mode='json')
+
+
 @app.get('/api/sample')
 def sample():
     return Response(sample_xlsx(), media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                     headers={'Content-Disposition': 'attachment; filename="sample_bom.xlsx"'})
+
+
+@app.get('/api/sample/ts')
+def ts_sample():
+    return FileResponse(ROOT / 'examples/ts_assem_sample.xlsx', filename='ts_assem_sample.xlsx',
+                        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 
 async def upload_bytes(file):
@@ -83,14 +122,30 @@ async def headers(file: UploadFile = File(...), sheet: str = Form(...), header_r
 
 
 @app.post('/api/preview')
-async def preview(file: UploadFile = File(...), sheet: str = Form(...), header_row: int = Form(...), mapping: str = Form(...)):
+async def preview(file: UploadFile = File(...), sheet: str = Form(...), header_row: int = Form(...),
+                  mapping: str = Form(...), kerf: str = Form('3')):
     try:
         mapped = json.loads(mapping)
         if not isinstance(mapped, dict):
             raise ValueError()
     except ValueError:
         raise HTTPException(400, '열 매핑 형식이 올바르지 않습니다.')
-    return await import_operation(parse_bom, await upload_bytes(file), sheet, header_row, mapped)
+    data = await import_operation(parse_bom, await upload_bytes(file), sheet, header_row, mapped)
+    if not data['errors']:
+        try:
+            request = OptimizeRequest(items=data['items'], kerf=kerf)
+            data.update(validate_plan_input(request, current_settings()))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    return data
+
+
+@app.post('/api/validate')
+def validate(request: OptimizeRequest):
+    try:
+        return validate_plan_input(request, current_settings())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post('/api/optimize')
@@ -98,7 +153,9 @@ def calculate(request: OptimizeRequest):
     if not SOLVE_LOCK.acquire(blocking=False):
         raise HTTPException(429, '다른 계산이 진행 중입니다. 잠시 후 다시 시도해 주세요.')
     try:
-        result = optimize(request)
+        result = plan_by_material(request, current_settings())
+    except PlanningIssues as exc:
+        return JSONResponse(status_code=409, content={'detail': str(exc), **exc.validation})
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     finally:

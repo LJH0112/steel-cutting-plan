@@ -3,10 +3,12 @@ import re
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .materials import DEFAULT_STOCK_LENGTHS, compact
+
 
 def millimeters(value) -> Decimal:
     try:
-        result = Decimal(str(value).strip().replace(',', ''))
+        result = Decimal(re.sub(r'\s+', '', str(value)).replace(',', ''))
     except (InvalidOperation, ValueError):
         raise ValueError('숫자를 입력해 주세요.')
     if not result.is_finite() or result < 0 or result > 100000:
@@ -22,8 +24,18 @@ class BOMItem(BaseModel):
     spec: str = Field(min_length=1, max_length=150)
     length: Decimal = Field(gt=0, le=100000)
     quantity: int = Field(gt=0, le=5000, strict=True)
+    source_row: int | None = Field(default=None, ge=1, le=10101)
+    title: str = Field(default='', max_length=150)
+    item_class: str = Field(default='', max_length=150)
+    weight: str = Field(default='', max_length=100)
+    paint_area: str = Field(default='', max_length=100)
 
-    @field_validator('material', 'spec')
+    @field_validator('material', 'spec', mode='before')
+    @classmethod
+    def remove_spaces(cls, value):
+        return compact(value) if isinstance(value, str) else value
+
+    @field_validator('material', 'spec', 'title', 'item_class', 'weight', 'paint_area')
     @classmethod
     def validate_text(cls, value):
         if re.search(r'[\x00-\x1f\x7f]', value):
@@ -38,13 +50,17 @@ class BOMItem(BaseModel):
 
 class OptimizeRequest(BaseModel):
     items: list[BOMItem] = Field(min_length=1, max_length=1000)
-    stock_lengths: list[Decimal] = Field(min_length=1, max_length=10)
+    stock_lengths: list[Decimal] | None = Field(default=None, min_length=1, max_length=20)
     kerf: Decimal = Field(default=Decimal('3'), ge=0, le=100)
     time_limit: int = Field(default=15, ge=1, le=60)
+    exclude_invalid: bool = Field(default=False, strict=True)
+    exclusion_token: str | None = Field(default=None, min_length=64, max_length=64)
 
     @field_validator('stock_lengths', mode='before')
     @classmethod
     def validate_stocks(cls, values):
+        if values is None:
+            return None
         if not isinstance(values, list):
             raise ValueError('발주 길이 목록이 필요합니다.')
         parsed = sorted({millimeters(v) for v in values})
@@ -56,3 +72,23 @@ class OptimizeRequest(BaseModel):
     @classmethod
     def validate_kerf(cls, value):
         return millimeters(value)
+
+
+class StockSettings(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    stock_lengths_by_type: dict[str, list[Decimal]]
+
+    @field_validator('stock_lengths_by_type', mode='before')
+    @classmethod
+    def validate_lengths(cls, value):
+        if not isinstance(value, dict) or set(value) != set(DEFAULT_STOCK_LENGTHS):
+            raise ValueError('6개 자재 종류의 발주 길이를 모두 지정해 주세요.')
+        result = {}
+        for name, lengths in value.items():
+            if not isinstance(lengths, list) or not 1 <= len(lengths) <= 20:
+                raise ValueError(f'{name}: 발주 길이는 1~20개까지 지정할 수 있습니다.')
+            parsed = sorted({millimeters(length) for length in lengths})
+            if any(length <= 30 for length in parsed):
+                raise ValueError(f'{name}: 발주 길이는 30mm보다 커야 합니다.')
+            result[name] = parsed
+        return result
