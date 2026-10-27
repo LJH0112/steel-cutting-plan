@@ -18,14 +18,15 @@
     <li id="step2"><b>02</b><div>절단 조건 설정<small>발주 길이와 절단 손실</small></div></li>
     <li id="step3"><b>03</b><div>계획 확인 및 출력<small>발주 목록 · CUTTING PLAN</small></div></li>
   </ol>
-  <div class="side-bottom"><div class="side-symbol">▥</div><strong>좋은 계획이 만드는<br>더 적은 낭비.</strong><p>필요한 자재는 정확하게,<br>남는 자재는 최소한으로.</p><div class="version">STEEL PLAN <span>v1.1</span></div></div>
+  <div class="side-bottom"><div class="side-symbol">▥</div><strong>좋은 계획이 만드는<br>더 적은 낭비.</strong><p>필요한 자재는 정확하게,<br>남는 자재는 최소한으로.</p><div class="version">STEEL PLAN <span>v1.2</span></div></div>
 </aside>
 <main>
   <header class="topbar"><div>워크스페이스 <span>/</span> <strong>발주 · 절단 최적화</strong></div><div class="top-status"><span class="green-dot"></span> Python Optimization Engine</div></header>
   <div class="page">
     <div class="page-heading"><div><div class="eyebrow">MATERIAL OPTIMIZATION</div><h1>철골 발주 · 절단 최적화</h1><p>엑셀 BOM을 실행 가능한 절단 계획으로. 자재의 낭비를 줄여보세요.</p></div><a href="/api/sample" class="button secondary">↓ <span>샘플 BOM 받기</span></a></div>
-    <div class="notice"><span class="notice-icon">↳</span><div><strong>잔재 30mm 초과 규칙이 적용됩니다.</strong><span> 모든 원자재는 절단 손실을 제외한 잔재가 30mm를 초과해야 합니다. 30mm 이하 조합은 허용하지 않습니다.</span></div><span class="rule-tag">STRICT RULE</span></div>
+    <div class="notice"><span class="notice-icon">↳</span><div><strong>잔재 30mm 초과 규칙이 적용됩니다.</strong><span> 실제 절단 조합은 날 손실을 제외한 잔재가 30mm를 초과해야 합니다. 이음 검토의 무절단 통재는 별도 표시합니다.</span></div><span class="rule-tag">STRICT RULE</span></div>
     <div id="alert" class="alert" role="alert" hidden></div>
+    <details id="input-details" class="input-details" open><summary>BOM 업로드 · 계산 조건 <span>클릭하여 열기/닫기</span></summary>
     <div class="setup-grid">
       <section class="card upload-card"><div class="section-title"><div><span class="section-number">01</span><h2>BOM 데이터</h2></div><span class="tag">EXCEL IMPORT</span></div>
         <div id="dropzone" class="dropzone"><div class="upload-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true" style="vertical-align:middle"><path d="M12 16V4m-4 4 4-4 4 4M4 15v5h16v-5"/></svg></div><h3 id="file-title">엑셀 BOM 파일을 올려주세요</h3><p id="file-description">파일을 여기로 끌어오거나 아래 버튼으로 선택하세요</p><label for="file" class="button secondary small">파일 선택 <span>↗</span></label><input id="file" type="file" accept=".xlsx" hidden><small>.xlsx · 최대 10MB · 길이 단위 mm</small></div>
@@ -44,24 +45,33 @@
           <button id="save-settings" class="button secondary full small">종류별 발주 길이 저장</button><p id="settings-status" role="status"></p>
         </details>
         <div class="two-fields"><div><label class="field-label" for="kerf">절단날 손실 <span class="unit-note">mm / 개</span></label><input id="kerf" type="number" value="3" min="0" max="100" step="0.001"></div><div><label class="field-label" for="time-limit">최대 계산 시간 <span class="unit-note">초</span></label><select id="time-limit"><option value="5">5초 · 빠르게</option><option value="15" selected>15초 · 기본</option><option value="30">30초 · 정밀하게</option><option value="60">60초 · 충분하게</option></select></div></div>
+        <details class="splice-options" open><summary>이음 제작·중량 조건</summary>
+          <label class="approval-choice"><input id="enable-splice" type="checkbox"> 6m 초과 각파이프의 이음 제작 검토 계획 포함 (선택 사항)</label>
+          <div class="two-fields"><div><label class="field-label" for="splice-allowance">이음 제작 여유 (mm/이음)</label><input id="splice-allowance" type="number" value="5" min="0" max="1000" step="0.001"></div><div><label class="field-label" for="reuse-min">재사용 잔재 최소 길이 (mm)</label><input id="reuse-min" type="number" value="5" min="0" max="100000" step="0.001"></div></div>
+          <label class="approval-choice"><input id="splice-approved" type="checkbox"> 이음 위치·연결 상세 승인 완료 (사용자 확인)</label>
+          <label class="field-label" for="weight-basis">WEIGHT.KG 해석 (미확인 시 공란)</label><select id="weight-basis"><option value="unspecified">미지정 · 중량 계산 안 함</option><option value="row_total">BOM 행 전체 중량 kg</option><option value="per_piece">부재 1개당 중량 kg</option></select>
+        </details>
         <div class="objective"><span>◎</span><div><strong>본수 우선, 그다음 로스 최소화</strong><p>동일 재질·규격끼리 조합합니다. 부재 1개당 절단 1회로 계산하며, 제한 시간 도달 시 최적해 미확정으로 표시합니다.</p></div></div>
         <button id="optimize" class="button primary full" disabled><span>절단 계획 최적화</span><span>→</span></button><div id="calculate-hint" class="calculate-hint">BOM 데이터를 먼저 불러와 주세요.</div>
       </section>
     </div>
     <section id="bom-section" class="card bom-section" hidden><div class="section-title"><div><span class="section-number">✓</span><h2>BOM 미리보기</h2><span id="bom-count" class="tag"></span></div><span class="unit-note">같은 재질·규격·길이는 계산 시 합산됩니다.</span></div><div class="table-scroll"><table><thead><tr><th>원본 행</th><th>부재 번호</th><th>재질</th><th>규격</th><th class="numeric">길이 (mm)</th><th class="numeric">수량 (개)</th></tr></thead><tbody id="bom-body"></tbody></table></div><div id="bom-more" class="table-foot"></div></section>
-    <section id="issues-section" class="card issues-section" hidden><div class="section-title"><div><span class="section-number">!</span><h2>계산 예외 부재</h2><span id="issues-count" class="tag"></span></div></div>
+    <section id="issues-section" class="card issues-section" hidden><div class="section-title"><div><span class="section-number">!</span><h2>계산 예외 · 발주 길이 초과</h2><span id="issues-count" class="tag"></span></div></div>
       <p>부재를 임의로 자르거나 누락하지 않습니다. BOM 또는 관리자 설정을 수정하거나, 아래 제외 옵션을 직접 선택해 주세요.</p>
       <div class="table-scroll"><table><thead><tr><th>원본 행</th><th>부재 번호</th><th>자재 종류</th><th>규격</th><th>길이 (mm)</th><th>수량</th><th>허용 길이 (mm)</th><th>원인</th></tr></thead><tbody id="issues-body"></tbody></table></div>
       <label class="exclude-choice"><input id="exclude-invalid" type="checkbox"> 위 예외 부재를 모두 제외하고 나머지 정상 데이터만 계산합니다.</label>
     </section>
+    <section id="splice-preview" class="splice-preview" hidden><h3>6m 초과 각파이프 · 이음 제작 검토 대상</h3><p id="splice-preview-text"></p></section>
+    </details>
     <section class="results-section" id="results-section">
-      <div class="results-heading"><div><div class="eyebrow">OPTIMIZATION RESULTS</div><h2>최적화 결과 <span id="result-badge" class="tag">READY WHEN YOU ARE</span></h2></div><div class="export-buttons" id="exports" hidden><button class="button secondary small" data-format="xlsx">↓ 엑셀 저장</button><button class="button secondary small" data-format="pdf">↓ PDF 저장</button></div></div>
+      <div class="results-heading"><div><div class="eyebrow">OPTIMIZATION RESULTS</div><h2>최적화 결과 <span id="result-badge" class="tag">READY WHEN YOU ARE</span></h2></div><div class="export-buttons" id="exports" hidden><label class="paper-label">인쇄 용지 <select id="paper-size" aria-label="인쇄 용지"><option value="A4">A4 가로</option><option value="A3">A3 가로</option></select></label><button class="button secondary small" data-format="xlsx">↓ 엑셀 저장</button><button class="button secondary small" data-format="pdf">↓ PDF 저장</button></div></div>
       <div id="result-empty" class="card empty-state"><div class="empty-illustration"><span></span><span></span><span></span></div><h3>다음 절단 계획을 준비해 볼까요?</h3><p>BOM을 불러오고 절단 조건을 설정하면<br>발주 목록과 효율적인 CUTTING PLAN을 확인할 수 있습니다.</p><div class="empty-steps"><span>01 BOM 업로드</span><i>→</i><span>02 조건 설정</span><i>→</i><span>03 계획 완성</span></div></div>
       <div id="result-content" hidden>
-        <div class="metrics"><div class="metric"><span>총 발주 수량</span><strong id="metric-bars"></strong><small id="metric-groups"></small></div><div class="metric"><span>전체 로스율</span><strong id="metric-loss" class="teal"></strong><small>잔재 + 절단날 손실 포함</small></div><div class="metric"><span>총 잔재 길이</span><strong id="metric-remnant"></strong><small>모든 원자재의 잔재 합계</small></div><div class="metric"><span>생산 부재 수량</span><strong id="metric-pieces"></strong><small id="metric-time"></small></div></div>
-        <div class="card result-card"><div class="tabs" role="tablist"><button id="tab-orders" class="tab active" role="tab" aria-selected="true" aria-controls="orders-view">발주 원자재 목록 <span id="orders-count"></span></button><button id="tab-patterns" class="tab" role="tab" aria-selected="false" aria-controls="patterns-view">CUTTING PLAN <span id="patterns-count"></span></button></div>
-          <div id="orders-view" role="tabpanel" aria-labelledby="tab-orders"><div class="table-scroll"><table><thead><tr><th>자재 종류</th><th>재질</th><th>규격</th><th class="numeric">발주 길이 (mm)</th><th class="numeric">수량 (본)</th><th class="numeric">총 발주 길이 (mm)</th><th class="numeric">로스율</th></tr></thead><tbody id="orders-body"></tbody></table></div><div class="table-foot">로스율 = (총 발주 길이 − 제품 길이) ÷ 총 발주 길이 × 100</div></div>
-          <div id="patterns-view" role="tabpanel" aria-labelledby="tab-patterns" hidden><div class="plan-toolbar"><span>같은 조합은 반복 본수로 묶었습니다. 표시 길이는 1본 기준입니다.</span><div><i class="legend product"></i> 제품 <i class="legend kerf"></i> 날 손실 <i class="legend rest"></i> 잔재</div></div><div id="patterns-list"></div></div>
+        <div class="result-summary"><span>발주 <strong id="metric-bars"></strong></span><span>총 로스율 <strong id="metric-loss"></strong></span><span>완성 부재 <strong id="metric-pieces"></strong></span><span id="physical-count"></span><span>잔철 <strong id="metric-remnant"></strong></span><small id="metric-groups"></small><small id="metric-time"></small></div>
+        <div id="fabrication-status" class="fabrication-status" hidden></div>
+        <div class="result-card"><div class="tabs" role="tablist"><button id="tab-orders" class="tab active" role="tab" aria-selected="true" aria-controls="orders-view">원자재 리스트 <span id="orders-count"></span></button><button id="tab-patterns" class="tab" role="tab" aria-selected="false" aria-controls="patterns-view">조합 리스트 <span id="patterns-count"></span></button></div>
+          <div id="orders-view" role="tabpanel" aria-labelledby="tab-orders"><div class="table-scroll"><table class="report-table"><thead id="orders-head"></thead><tbody id="orders-body"></tbody></table></div><div class="table-foot">단위 mm, kg. 조합길이·잔철은 행 수량 전체 합계, 소계·합계의 길이는 총 발주 길이입니다. 사용율=제작 절편 길이÷발주 길이×100. 단위중량이 없는 원자재 중량은 공란입니다.</div></div>
+          <div id="patterns-view" role="tabpanel" aria-labelledby="tab-patterns" hidden><div class="table-foot">조합길이·잔철·등분은 원자재 1본 기준입니다. 총수량=등분×원자재 수량. 비고의 BOM 번호별 수량은 총수량 기준입니다.</div><div id="splice-results"></div><div id="patterns-list"></div></div>
         </div>
         <section id="excluded-results" class="excluded-results"><h3>계산 제외 부재</h3><p id="excluded-summary"></p><div class="table-scroll"><table><thead><tr><th>행</th><th>부재 번호</th><th>자재 종류</th><th>규격</th><th>길이 (mm)</th><th>수량</th><th>허용 길이</th><th>제외 원인</th></tr></thead><tbody id="excluded-body"></tbody></table></div></section>
         <details class="solver-details"><summary>계산 조건 및 그룹별 최적화 상태</summary><p id="result-settings"></p><ul id="solver-status"></ul><p>최적해 미확정은 사용 가능한 조합이며, 더 나은 조합이 존재할 수 있습니다. 발주 본수를 먼저 최소화하므로 원자재 가격을 최소화하는 계획과는 다를 수 있습니다.</p></details>

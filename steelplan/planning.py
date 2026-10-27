@@ -4,6 +4,8 @@ import json
 
 from .materials import classify_material
 from .optimizer import MIN_REMAINDER, optimize, units
+from .reports import build_report
+from .splicing import needs_splice, optimize_with_splices
 
 
 class PlanningIssues(ValueError):
@@ -13,7 +15,7 @@ class PlanningIssues(ValueError):
         super().__init__('계산 예외가 있습니다. 설정을 수정하거나 예외 부재 제외에 동의한 뒤 다시 계산해 주세요.')
 
 
-def assess_items(items, kerf, settings):
+def assess_items(items, kerf, settings, enable_splice_planning=False):
     eligible, issues = [], []
     for index, item in enumerate(items):
         kind = classify_material(item.spec)
@@ -21,6 +23,8 @@ def assess_items(items, kerf, settings):
         code = reason = None
         if kind is None:
             code, reason = 'UNSUPPORTED_MATERIAL', '미지원 자재: DESCRIPTION 규격 형식을 확인해 주세요.'
+        elif enable_splice_planning and needs_splice(item):
+            pass  # Deliberately retained for whole-stock base + connector fabrication.
         elif item.length > max(allowed):
             code, reason = 'STOCK_LENGTH_EXCEEDED', '발주 가능 길이 초과'
         elif units(item.length) + units(kerf) + MIN_REMAINDER > units(max(allowed)):
@@ -40,11 +44,16 @@ def validate_plan_input(request, settings):
         raise ValueError('전역 발주 길이는 사용할 수 없습니다. 관리자 설정의 자재 종류별 길이를 사용해 주세요.')
     if sum(item.quantity for item in request.items) > 5000:
         raise ValueError('총 부재 수량은 5,000개 이하여야 합니다.')
-    eligible, issues = assess_items(request.items, request.kerf, settings)
+    eligible, issues = assess_items(request.items, request.kerf, settings, request.enable_splice_planning)
     snapshot = {'items': [i.model_dump(mode='json') for i in request.items],
-                'settings': settings.model_dump(mode='json'), 'kerf': str(request.kerf.normalize())}
+                'settings': settings.model_dump(mode='json'), 'kerf': str(request.kerf.normalize()),
+                'splice_allowance': str(request.splice_allowance.normalize()),
+                'reusable_remnant_min': str(request.reusable_remnant_min.normalize()),
+                'enable_splice_planning': request.enable_splice_planning}
     token = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
     return {'issues': issues, 'exclusion_token': token, 'eligible_rows': len(eligible),
+            'splice_candidates': [{**i.model_dump(mode='json'), 'status': '검토 필요', 'base_length': 6000}
+                                  for i in eligible if needs_splice(i)],
             'eligible_pieces': sum(item.quantity for item in eligible),
             'excluded_pieces': sum(issue['quantity'] for issue in issues)}
 
@@ -54,10 +63,13 @@ def plan_by_material(request, settings):
     issues = validation['issues']
     if issues and (not request.exclude_invalid or request.exclusion_token != validation['exclusion_token']):
         raise PlanningIssues(validation)
-    eligible, _ = assess_items(request.items, request.kerf, settings)
+    eligible, _ = assess_items(request.items, request.kerf, settings, request.enable_splice_planning)
     if not eligible:
         raise ValueError('계산 가능한 정상 부재가 없습니다. 예외 목록과 관리자 설정을 확인해 주세요.')
-    plan = optimize(request.model_copy(update={'items': eligible}), settings.stock_lengths_by_type)
+    if request.enable_splice_planning:
+        plan = optimize_with_splices(request.model_copy(update={'items': eligible}), settings)
+    else:
+        plan = optimize(request.model_copy(update={'items': eligible}), settings.stock_lengths_by_type)
     plan['excluded'] = issues
     plan['bom'] = [item.model_dump(mode='json') for item in request.items]
     excluded_indices = {issue['input_index'] for issue in issues}
@@ -66,4 +78,8 @@ def plan_by_material(request, settings):
         item['material_type'] = classify_material(item['spec']) or '미지원 자재'
     plan['summary'].update(input_rows=len(request.items), input_piece_count=sum(i.quantity for i in request.items),
                            excluded_rows=len(issues), excluded_piece_count=validation['excluded_pieces'])
+    if plan['summary']['piece_count'] + plan['summary']['excluded_piece_count'] != plan['summary']['input_piece_count']:
+        raise RuntimeError('완성 부재 수량 검증 실패')
+    plan['settings']['weight_basis'] = request.weight_basis
+    plan['report'] = build_report(plan)
     return plan

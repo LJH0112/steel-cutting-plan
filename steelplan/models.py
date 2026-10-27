@@ -1,5 +1,6 @@
 from decimal import Decimal, InvalidOperation
 import re
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -55,6 +56,11 @@ class OptimizeRequest(BaseModel):
     time_limit: int = Field(default=15, ge=1, le=60)
     exclude_invalid: bool = Field(default=False, strict=True)
     exclusion_token: str | None = Field(default=None, min_length=64, max_length=64)
+    weight_basis: Literal['unspecified', 'row_total', 'per_piece'] = 'unspecified'
+    splice_allowance: Decimal = Field(default=Decimal('5'), ge=0, le=1000)
+    reusable_remnant_min: Decimal = Field(default=Decimal('5'), ge=0, le=100000)
+    splice_details_approved: bool = Field(default=False, strict=True)
+    enable_splice_planning: bool = Field(default=False, strict=True)
 
     @field_validator('stock_lengths', mode='before')
     @classmethod
@@ -68,7 +74,7 @@ class OptimizeRequest(BaseModel):
             raise ValueError('발주 길이는 30mm보다 커야 합니다.')
         return parsed
 
-    @field_validator('kerf', mode='before')
+    @field_validator('kerf', 'splice_allowance', 'reusable_remnant_min', mode='before')
     @classmethod
     def validate_kerf(cls, value):
         return millimeters(value)
@@ -91,4 +97,6 @@ class StockSettings(BaseModel):
             if any(length <= 30 for length in parsed):
                 raise ValueError(f'{name}: 발주 길이는 30mm보다 커야 합니다.')
             result[name] = parsed
+        if result['각파이프'] != [Decimal('6000')]:
+            raise ValueError('각파이프 발주 길이는 6000mm 고정입니다. 긴 부재는 이음 제작 검토 대상으로 처리합니다.')
         return result

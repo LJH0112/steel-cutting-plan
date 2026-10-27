@@ -2,7 +2,6 @@
 const $ = id => document.getElementById(id);
 const state = {file: null, sheets: [], items: [], issues: [], result: null, working: false, validationVersion: 0};
 const fields = {material: '재질', spec: '규격', length: '길이 (mm)', quantity: '수량'};
-const colors = ['#087f6b', '#2f9e8c', '#59b5a2', '#80c9b8', '#397f99', '#63a2b9'];
 const fmt = value => Number(value).toLocaleString('ko-KR', {maximumFractionDigits: 3});
 const esc = value => String(value).replace(/[&<>"']/g, char => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[char]));
 
@@ -35,6 +34,7 @@ async function api(path, options = {}) {
   return response.json();
 }
 function clearResults() {
+  $('input-details').open = true;
   state.result = null;
   $('exports').hidden = true;
   $('result-content').hidden = true;
@@ -49,6 +49,7 @@ function clearBOM() {
   state.eligibleRows = 0;
   state.exclusionToken = null;
   state.issues = [];
+  $('splice-preview').hidden = true;
   $('issues-section').hidden = true;
   $('exclude-invalid').checked = false;
   $('bom-section').hidden = true;
@@ -67,6 +68,9 @@ function sheetForm() {
   form.append('sheet', $('sheet').value);
   form.append('header_row', $('header-row').value);
   form.append('kerf', $('kerf').value);
+  form.append('splice_allowance', $('splice-allowance').value);
+  form.append('reusable_remnant_min', $('reuse-min').value);
+  form.append('enable_splice_planning', String($('enable-splice').checked));
   return form;
 }
 function renderMapping(headers, mapping) {
@@ -174,6 +178,9 @@ $('preview').addEventListener('click', async () => {
   finally { busy(false); }
 });
 $('kerf').addEventListener('input', revalidate);
+['splice-allowance', 'reuse-min'].forEach(id => $(id).addEventListener('input', revalidate));
+$('enable-splice').addEventListener('change', revalidate);
+['splice-approved', 'weight-basis'].forEach(id => $(id).addEventListener('change', clearResults));
 $('time-limit').addEventListener('input', clearResults);
 $('exclude-invalid').addEventListener('change', () => { clearResults(); updateCalculateButton(); });
 $('optimize').addEventListener('click', async () => {
@@ -184,7 +191,10 @@ $('optimize').addEventListener('click', async () => {
   busy(true, '더 효율적인 절단 조합을 찾고 있습니다', `최대 ${$('time-limit').value}초 동안 재질·규격별로 계산합니다. 잠시만 기다려 주세요.`);
   try {
     state.result = await api('/api/optimize', {method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({items: state.items, kerf, time_limit: Number($('time-limit').value), exclude_invalid: $('exclude-invalid').checked, exclusion_token: state.exclusionToken})});
+      body: JSON.stringify({items: state.items, kerf, time_limit: Number($('time-limit').value), exclude_invalid: $('exclude-invalid').checked, exclusion_token: state.exclusionToken,
+        splice_allowance: $('splice-allowance').value, reusable_remnant_min: $('reuse-min').value,
+        splice_details_approved: $('splice-approved').checked, enable_splice_planning: $('enable-splice').checked,
+        weight_basis: $('weight-basis').value})});
     renderResult();
     $('results-section').scrollIntoView({behavior: 'smooth', block: 'start'});
   } catch (e) { if (e.data?.issues) applyValidation(e.data); error(e.message); }
@@ -192,7 +202,8 @@ $('optimize').addEventListener('click', async () => {
 });
 function metric(id, value, unit) { $(id).innerHTML = `${fmt(value)}<em>${esc(unit)}</em>`; }
 function renderResult() {
-  const result = state.result, s = result.summary;
+  const result = state.result, s = result.summary, report = result.report;
+  $('input-details').open = false;
   $('result-empty').hidden = true;
   $('result-content').hidden = false;
   $('exports').hidden = false;
@@ -206,25 +217,40 @@ function renderResult() {
   $('metric-time').textContent = `${s.elapsed_seconds}초 소요 · 수량 검증 완료`;
   $('orders-count').textContent = result.orders.length;
   $('patterns-count').textContent = result.patterns.length;
-  $('orders-body').innerHTML = result.orders.map(o => `<tr><td>${esc(o.material_type)}</td><td>${esc(o.material)}</td><td>${esc(o.spec)}</td><td class="numeric">${fmt(o.stock_length)}</td><td class="numeric"><strong>${fmt(o.quantity)}</strong></td><td class="numeric">${fmt(o.total_length)}</td><td class="numeric">${fmt(o.loss_rate)}%</td></tr>`).join('');
-  $('patterns-list').innerHTML = result.patterns.map(patternHTML).join('');
+  $('physical-count').textContent = `제작 절편 ${fmt(report.output_piece_count)}개`;
+  $('orders-head').innerHTML = '<tr>' + report.material_columns.map(c => `<th>${esc(c.label)}</th>`).join('') + '</tr>';
+  $('orders-body').innerHTML = report.material_rows.map(row => `<tr class="${row.kind}">${report.material_columns.map((c, i) => `<td class="${i > 1 ? 'numeric' : ''}">${reportCell(row[c.key])}</td>`).join('')}</tr>`).join('');
+  $('patterns-list').innerHTML = report.combination_groups.map(group => combinationGroupHTML(group, report.combination_columns)).join('');
+  renderSplices(result);
   $('result-settings').textContent = `${Object.entries(result.settings.stock_lengths_by_type).map(([k,v]) => `${k}: ${v.map(fmt).join(', ')}mm`).join(' / ')} · 날 손실 ${fmt(result.settings.kerf)}mm/개 · 잔재 > 30mm · 총 제품 ${fmt(s.total_parts_length)}mm · 총 날 손실 ${fmt(s.total_kerf_loss)}mm`;
   $('solver-status').innerHTML = result.statuses.map(r => `<li>${esc(r.material)} / ${esc(r.spec)} — ${esc(r.detail)}</li>`).join('');
   $('excluded-summary').textContent = result.excluded.length ? `${result.excluded.length}행 · ${fmt(s.excluded_piece_count)}개 제외 / 입력 ${fmt(s.input_piece_count)}개 = 생산 ${fmt(s.piece_count)}개 + 제외 ${fmt(s.excluded_piece_count)}개. 사용자가 제외를 선택한 부재입니다.` : '계산 제외 부재 없음 · 모든 입력 부재를 계산했습니다.';
   $('excluded-body').innerHTML = issueRows(result.excluded);
+  if (s.total_splice_allowance) $('result-settings').textContent += ` · 이음 여유 합계 ${fmt(s.total_splice_allowance)}mm · 이음 여유 포함 순 로스율 ${fmt(s.net_loss_rate)}%`;
   selectTab('orders');
 }
-function patternHTML(p) {
-  let bars = '', legend = '';
-  p.cuts.forEach((cut, i) => {
-    const width = cut.length * cut.quantity / p.stock_length * 100;
-    const text = `${fmt(cut.length)} × ${cut.quantity}`;
-    bars += `<div class="cut-segment" style="width:${width}%;background:${colors[i % colors.length]}" title="${text}개">${width > 9 ? text : ''}</div>`;
-    legend += `<span><i style="background:${colors[i % colors.length]}"></i>${text}개</span>`;
-  });
-  const kerfWidth = p.kerf_loss / p.stock_length * 100, restWidth = p.remnant / p.stock_length * 100;
-  bars += `<div class="cut-segment kerf-segment" style="width:${kerfWidth}%" title="날 손실 ${fmt(p.kerf_loss)}mm"></div><div class="cut-segment remnant-segment" style="width:${restWidth}%" title="잔재 ${fmt(p.remnant)}mm">${restWidth > 7 ? fmt(p.remnant) : ''}</div>`;
-  return `<article class="pattern"><div class="pattern-heading"><div><span class="pattern-id">${esc(p.id)}</span><strong>${esc(p.material_type)} / ${esc(p.material)} / ${esc(p.spec)}</strong><small>원자재 ${fmt(p.stock_length)}mm</small></div><span class="repeat-badge">× ${p.bar_count}본 반복</span></div><div class="cut-bar" role="img" aria-label="${esc(p.id)} 절단 조합: ${p.cuts.map(c => `${fmt(c.length)}mm ${c.quantity}개`).join(', ')}, 잔재 ${fmt(p.remnant)}mm">${bars}</div><div class="pattern-detail"><div class="cut-legend">${legend}</div><span class="pattern-totals">날 손실 ${fmt(p.kerf_loss)} · 잔재 <strong>${fmt(p.remnant)}mm</strong> · 로스 ${fmt(p.loss_rate)}%</span></div></article>`;
+function reportCell(value) {
+  return value === null || value === undefined ? '' : typeof value === 'number' ? fmt(value) : esc(value);
+}
+function combinationGroupHTML(group, columns) {
+  const heading = `${esc(group.material)} / ${esc(group.spec)} <small>${esc(group.material_type)}</small>`;
+  const bodies = group.patterns.map(pattern => {
+    const rows = pattern.cuts.map((cut, index) => {
+      const common = index ? '' : columns.slice(0, 6).map(c => `<td rowspan="${pattern.cuts.length}" class="numeric">${reportCell(pattern[c.key])}</td>`).join('');
+      return `<tr>${common}<td class="numeric">${fmt(cut.length)}</td><td class="numeric">${fmt(cut.split_count)}</td><td class="numeric output-quantity" data-quantity="${cut.total_quantity}">${fmt(cut.total_quantity)}</td><td class="remarks">${esc(cut.remarks)}</td></tr>`;
+    }).join('');
+    return `<tbody class="pattern-rows" data-pattern="${esc(pattern.id)}">${rows}</tbody>`;
+  }).join('');
+  return `<section class="combo-group"><h3>${heading}</h3><div class="table-scroll"><table class="report-table combination-table"><thead><tr>${columns.map(c => `<th>${esc(c.label)}</th>`).join('')}</tr></thead>${bodies}</table></div></section>`;
+}
+function renderSplices(result) {
+  const assemblies = result.splices || [];
+  $('fabrication-status').hidden = !assemblies.length;
+  if (!assemblies.length) { $('splice-results').replaceChildren(); return; }
+  const summary = result.splice_summary;
+  const status = summary.review_required ? '검토 필요 · 이음 위치·연결 상세 승인 전 제작 확정 아님' : '이음 위치·연결 상세: 사용자 승인 입력됨';
+  $('fabrication-status').textContent = `${status} / 6m 통재 ${summary.whole_stock_bars}본 / 잔재 연결재 ${summary.reused_connectors}개 / 연결재 추가 발주 ${summary.extra_connector_stock_bars}본 / 이음 여유 ${fmt(result.settings.splice_allowance)}mm/이음 (날 손실 별도).`;
+  $('splice-results').innerHTML = `<h3>이음 제작 검토 · ${esc(status)}</h3><div class="table-scroll"><table class="report-table"><thead><tr><th>원본 행</th><th>부재 번호</th><th>규격</th><th>완성 길이</th><th>수량</th><th>본재 길이</th><th>연결재 길이</th><th>통재 본수/부재</th><th>이음 수/부재</th><th>상태</th></tr></thead><tbody>${assemblies.map(a => `<tr><td>${a.row || ''}</td><td>${esc(a.title)}</td><td>${esc(a.spec)}</td><td>${fmt(a.finished_length)}</td><td>${a.quantity}</td><td>${fmt(a.base_length)}</td><td>${fmt(a.connector_length)}</td><td>${a.whole_bars_per_part}</td><td>${a.joint_count}</td><td>${esc(a.status)}</td></tr>`).join('')}</tbody></table></div>`;
 }
 function selectTab(name) {
   for (const tab of ['orders', 'patterns']) {
@@ -240,7 +266,7 @@ document.querySelectorAll('[data-format]').forEach(button => button.addEventList
   const format = button.dataset.format;
   busy(true, `${format === 'pdf' ? 'PDF' : '엑셀'} 파일을 준비하고 있습니다`);
   try {
-    const response = await fetch(`/api/results/${state.result.job_id}.${format}`);
+    const response = await fetch(`/api/results/${state.result.job_id}.${format}?paper_size=${$('paper-size').value}`);
     if (!response.ok) throw new Error(await responseError(response));
     const url = URL.createObjectURL(await response.blob());
     const link = document.createElement('a');
@@ -252,12 +278,15 @@ document.querySelectorAll('[data-format]').forEach(button => button.addEventList
 }));
 
 function issueRows(issues) {
-  return issues.map(e => `<tr><td>${e.row}</td><td>${esc(e.title || '—')}</td><td>${esc(e.material_type)}</td><td>${esc(e.spec)}</td><td class="numeric">${fmt(e.length)}</td><td>${fmt(e.quantity)}</td><td>${e.allowed_lengths.map(fmt).join(', ') || '—'}</td><td>${esc(e.reason)}</td></tr>`).join('');
+  return issues.map(e => `<tr><td>${e.row}</td><td>${esc(e.title || '—')}</td><td>${esc(e.material_type)}</td><td>${esc(e.spec)}</td><td class="numeric">${fmt(e.length)}</td><td>${fmt(e.quantity)}</td><td>${e.allowed_lengths.map(fmt).join(', ') || '—'}</td><td>${esc(e.code === 'STOCK_LENGTH_EXCEEDED' ? '발주 길이 초과' : e.reason)}</td></tr>`).join('');
 }
 function applyValidation(data) {
   state.validationPending = false;
   state.exclusionToken = data.exclusion_token;
   state.issues = data.issues || [];
+  const splices = data.splice_candidates || [];
+  $('splice-preview').hidden = !splices.length;
+  $('splice-preview-text').textContent = splices.map(i => `${i.source_row || ''}행 ${i.title || ''} / ${i.spec} / ${fmt(i.length)}mm × ${i.quantity}개`).join(' · ') + ' — 제외하지 않고 6m 통재 본재 + 연결재로 계획합니다. 승인 전 검토 필요.';
   state.eligibleRows = data.eligible_rows ?? state.items.length - state.issues.length;
   $('exclude-invalid').checked = false;
   $('issues-section').hidden = !state.issues.length;
@@ -278,7 +307,7 @@ async function revalidate() {
   $('exclude-invalid').checked = false;
   updateCalculateButton();
   try {
-    const data = await api('/api/validate', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({items: state.items, kerf: $('kerf').value})});
+    const data = await api('/api/validate', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({items: state.items, kerf: $('kerf').value, splice_allowance: $('splice-allowance').value, reusable_remnant_min: $('reuse-min').value, enable_splice_planning: $('enable-splice').checked})});
     if (version !== state.validationVersion) return;
     state.validationPending = false;
     applyValidation(data);
@@ -293,7 +322,8 @@ function renderSettings(settings) {
   for (const [kind, lengths] of entries) {
     const label = document.createElement('label'); label.className = 'field-label'; label.textContent = kind;
     const input = document.createElement('input'); input.dataset.materialType = kind;
-    input.value = lengths.join(', '); input.setAttribute('aria-label', `${kind} 발주 길이`);
+    input.value = lengths.join(', ');
+    if (kind === '각파이프') { input.readOnly = true; input.title = '6000mm 고정 · 초과 부재는 이음 제작 검토'; } input.setAttribute('aria-label', `${kind} 발주 길이`);
     label.append(input); $('stock-editors').append(label);
   }
 }

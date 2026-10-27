@@ -8,6 +8,7 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 from uuid import uuid4
+from typing import Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
 from fastapi.exceptions import RequestValidationError
@@ -22,7 +23,7 @@ from steelplan.planning import PlanningIssues, plan_by_material, validate_plan_i
 from steelplan.settings import load_settings, save_settings
 
 ROOT = Path(__file__).resolve().parent
-app = FastAPI(title='STEEL PLAN · 철골 절단 최적화', version='1.1.0')
+app = FastAPI(title='STEEL PLAN · 철골 절단 최적화', version='1.2.0')
 app.mount('/static', StaticFiles(directory=ROOT / 'static'), name='static')
 app.mount('/fonts', StaticFiles(directory=ROOT / 'assets/fonts'), name='fonts')
 RESULTS = OrderedDict()
@@ -123,7 +124,8 @@ async def headers(file: UploadFile = File(...), sheet: str = Form(...), header_r
 
 @app.post('/api/preview')
 async def preview(file: UploadFile = File(...), sheet: str = Form(...), header_row: int = Form(...),
-                  mapping: str = Form(...), kerf: str = Form('3')):
+                  mapping: str = Form(...), kerf: str = Form('3'), splice_allowance: str = Form('5'),
+                  reusable_remnant_min: str = Form('5'), enable_splice_planning: bool = Form(False)):
     try:
         mapped = json.loads(mapping)
         if not isinstance(mapped, dict):
@@ -133,7 +135,8 @@ async def preview(file: UploadFile = File(...), sheet: str = Form(...), header_r
     data = await import_operation(parse_bom, await upload_bytes(file), sheet, header_row, mapped)
     if not data['errors']:
         try:
-            request = OptimizeRequest(items=data['items'], kerf=kerf)
+            request = OptimizeRequest(items=data['items'], kerf=kerf, splice_allowance=splice_allowance,
+                                      reusable_remnant_min=reusable_remnant_min, enable_splice_planning=enable_splice_planning)
             data.update(validate_plan_input(request, current_settings()))
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -173,7 +176,7 @@ def calculate(request: OptimizeRequest):
 
 
 @app.get('/api/results/{job_id}.{format}')
-def download(job_id: str, format: str):
+def download(job_id: str, format: str, paper_size: Literal['A4', 'A3'] = 'A4'):
     if format not in ('xlsx', 'pdf'):
         raise HTTPException(404, '지원하지 않는 출력 형식입니다.')
     with RESULT_LOCK:
@@ -182,7 +185,7 @@ def download(job_id: str, format: str):
             RESULTS.pop(job_id, None)
             raise HTTPException(404, '결과가 만료되었거나 서버가 재시작되었습니다. 다시 계산해 주세요.')
         plan = saved[1]
-    content = export_xlsx(plan) if format == 'xlsx' else export_pdf(plan)
+    content = export_xlsx(plan, paper_size) if format == 'xlsx' else export_pdf(plan, paper_size)
     mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' if format == 'xlsx' else 'application/pdf'
     return Response(content, media_type=mime, headers={'Content-Disposition': f'attachment; filename="steel_cutting_plan.{format}"',
                                                        'Cache-Control': 'no-store'})

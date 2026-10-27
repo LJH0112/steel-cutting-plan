@@ -173,7 +173,7 @@ def test_fixed_length_overflow_requires_explicit_exclusion_and_preserves_identit
     wb = load_workbook(io.BytesIO(export_xlsx(plan)))
     assert wb['계산 제외 부재']['B2'].value == 'P-OVER'
     assert wb['계산 제외 부재']['F2'].value == 6184
-    assert wb['계산 제외 부재']['I2'].value == '발주 가능 길이 초과'
+    assert wb['계산 제외 부재']['I2'].value == '발주 길이 초과'
     assert wb['BOM']['K2'].value == '제외'
     assert export_pdf(plan).startswith(b'%PDF-')
 
@@ -195,20 +195,20 @@ def test_fixed_stock_kerf_and_strict_remnant_boundary(length, kerf, expected):
 def test_settings_admin_auth_atomic_save_and_new_lengths(monkeypatch):
     monkeypatch.setenv('STEELPLAN_ADMIN_PASSWORD', 'test-only-password')
     initial = client.get('/api/settings').json()
-    initial['stock_lengths_by_type']['각파이프'] = [8000]
+    initial['stock_lengths_by_type']['H빔'] = [8000]
     assert client.put('/api/settings', json=initial).status_code == 403
     assert client.put('/api/settings', json=initial, headers={'X-Admin-Password': 'wrong'}).status_code == 403
     result = client.put('/api/settings', json=initial, headers={'X-Admin-Password': 'test-only-password'})
     assert result.status_code == 200
-    assert settings_module.load_settings().stock_lengths_by_type['각파이프'] == [8000]
+    assert settings_module.load_settings().stock_lengths_by_type['H빔'] == [8000]
     assert settings_module.SETTINGS_PATH.exists()
-    request = OptimizeRequest(items=[item('P100*100*4', 6184)], time_limit=1)
+    request = OptimizeRequest(items=[item('H-300', 6184)], time_limit=1)
     plan = plan_by_material(request, settings_module.load_settings())
     assert plan['orders'][0]['stock_length'] == 8000
     assert plan['excluded'] == []
-    invalid = {**initial, 'stock_lengths_by_type': {**initial['stock_lengths_by_type'], '각파이프': [30]}}
+    invalid = {**initial, 'stock_lengths_by_type': {**initial['stock_lengths_by_type'], 'H빔': [30]}}
     assert client.put('/api/settings', json=invalid, headers={'X-Admin-Password': 'test-only-password'}).status_code == 422
-    assert settings_module.load_settings().stock_lengths_by_type['각파이프'] == [8000]
+    assert settings_module.load_settings().stock_lengths_by_type['H빔'] == [8000]
 
 
 def test_global_lengths_cannot_override_per_type():
