@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>STEEL PLAN · 철골 발주 및 절단 최적화</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+<aside class="sidebar">
+  <a href="/" class="brand"><span class="brand-icon">S<span>╱</span></span><span>STEEL<span class="brand-light">PLAN</span><small>CUT SMART. BUILD BETTER.</small></span></a>
+  <div class="workspace-tag"><span class="green-dot"></span> 철골 제작 워크스페이스</div>
+  <div class="nav-label">WORKSPACE</div>
+  <div class="nav-item active"><span>▤</span> 발주 · 절단 최적화 <span class="nav-arrow">↗</span></div>
+  <div class="nav-label guide-label">WORKFLOW</div>
+  <ol class="steps">
+    <li class="current" id="step1"><b>01</b><div>자재 데이터 준비<small>엑셀 BOM 업로드</small></div></li>
+    <li id="step2"><b>02</b><div>절단 조건 설정<small>발주 길이와 절단 손실</small></div></li>
+    <li id="step3"><b>03</b><div>계획 확인 및 출력<small>발주 목록 · CUTTING PLAN</small></div></li>
+  </ol>
+  <div class="side-bottom"><div class="side-symbol">▥</div><strong>좋은 계획이 만드는<br>더 적은 낭비.</strong><p>필요한 자재는 정확하게,<br>남는 자재는 최소한으로.</p><div class="version">STEEL PLAN <span>v1.0</span></div></div>
+</aside>
+<main>
+  <header class="topbar"><div>워크스페이스 <span>/</span> <strong>발주 · 절단 최적화</strong></div><div class="top-status"><span class="green-dot"></span> Python Optimization Engine</div></header>
+  <div class="page">
+    <div class="page-heading"><div><div class="eyebrow">MATERIAL OPTIMIZATION</div><h1>철골 발주 · 절단 최적화</h1><p>엑셀 BOM을 실행 가능한 절단 계획으로. 자재의 낭비를 줄여보세요.</p></div><a href="/api/sample" class="button secondary">↓ <span>샘플 BOM 받기</span></a></div>
+    <div class="notice"><span class="notice-icon">↳</span><div><strong>잔재 30mm 초과 규칙이 적용됩니다.</strong><span> 모든 원자재는 절단 손실을 제외한 잔재가 30mm를 초과해야 합니다. 30mm 이하 조합은 허용하지 않습니다.</span></div><span class="rule-tag">STRICT RULE</span></div>
+    <div id="alert" class="alert" role="alert" hidden></div>
+    <div class="setup-grid">
+      <section class="card upload-card"><div class="section-title"><div><span class="section-number">01</span><h2>BOM 데이터</h2></div><span class="tag">EXCEL IMPORT</span></div>
+        <div id="dropzone" class="dropzone"><div class="upload-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true" style="vertical-align:middle"><path d="M12 16V4m-4 4 4-4 4 4M4 15v5h16v-5"/></svg></div><h3 id="file-title">엑셀 BOM 파일을 올려주세요</h3><p id="file-description">파일을 여기로 끌어오거나 아래 버튼으로 선택하세요</p><label for="file" class="button secondary small">파일 선택 <span>↗</span></label><input id="file" type="file" accept=".xlsx" hidden><small>.xlsx · 최대 10MB · 길이 단위 mm</small></div>
+        <div class="import-footer"><span class="subtle-icon">▦</span> 재질 · 규격 · 길이 · 수량 열을 자동으로 인식합니다.<button id="sample" class="text-button">샘플로 시작하기 →</button></div>
+        <div id="mapping-panel" hidden>
+          <div class="mapping-top"><label>시트<select id="sheet" aria-label="BOM 시트"></select></label><label>헤더 행<input id="header-row" type="number" value="1" min="1" max="100"></label><button id="headers" class="button secondary small">열 다시 읽기</button></div>
+          <div class="mapping-grid" id="mapping"></div><button id="preview" class="button secondary full">BOM 읽기 · 미리보기</button>
+        </div>
+      </section>
+      <section class="card settings-card"><div class="section-title"><div><span class="section-number">02</span><h2>절단 조건</h2></div><span class="unit-note">단위 mm</span></div>
+        <label class="field-label" for="stocks">발주 가능한 원자재 길이 <span class="required">*</span></label>
+        <input id="stocks" type="text" value="6000, 9000, 12000" placeholder="예: 6000, 9000, 12000" autocomplete="off"><div class="field-hint">여러 길이는 쉼표로 구분하세요. 재질·규격별로 자동 선택합니다.</div>
+        <div class="two-fields"><div><label class="field-label" for="kerf">절단날 손실 <span class="unit-note">mm / 개</span></label><input id="kerf" type="number" value="3" min="0" max="100" step="0.001"></div><div><label class="field-label" for="time-limit">최대 계산 시간 <span class="unit-note">초</span></label><select id="time-limit"><option value="5">5초 · 빠르게</option><option value="15" selected>15초 · 기본</option><option value="30">30초 · 정밀하게</option><option value="60">60초 · 충분하게</option></select></div></div>
+        <div class="objective"><span>◎</span><div><strong>본수 우선, 그다음 로스 최소화</strong><p>동일 재질·규격끼리 조합합니다. 부재 1개당 절단 1회로 계산하며, 제한 시간 도달 시 최적해 미확정으로 표시합니다.</p></div></div>
+        <button id="optimize" class="button primary full" disabled><span>절단 계획 최적화</span><span>→</span></button><div id="calculate-hint" class="calculate-hint">BOM 데이터를 먼저 불러와 주세요.</div>
+      </section>
+    </div>
+    <section id="bom-section" class="card bom-section" hidden><div class="section-title"><div><span class="section-number">✓</span><h2>BOM 미리보기</h2><span id="bom-count" class="tag"></span></div><span class="unit-note">같은 재질·규격·길이는 계산 시 합산됩니다.</span></div><div class="table-scroll"><table><thead><tr><th>No.</th><th>재질</th><th>규격</th><th class="numeric">길이 (mm)</th><th class="numeric">수량 (개)</th></tr></thead><tbody id="bom-body"></tbody></table></div><div id="bom-more" class="table-foot"></div></section>
+    <section class="results-section" id="results-section">
+      <div class="results-heading"><div><div class="eyebrow">OPTIMIZATION RESULTS</div><h2>최적화 결과 <span id="result-badge" class="tag">READY WHEN YOU ARE</span></h2></div><div class="export-buttons" id="exports" hidden><button class="button secondary small" data-format="xlsx">↓ 엑셀 저장</button><button class="button secondary small" data-format="pdf">↓ PDF 저장</button></div></div>
+      <div id="result-empty" class="card empty-state"><div class="empty-illustration"><span></span><span></span><span></span></div><h3>다음 절단 계획을 준비해 볼까요?</h3><p>BOM을 불러오고 절단 조건을 설정하면<br>발주 목록과 효율적인 CUTTING PLAN을 확인할 수 있습니다.</p><div class="empty-steps"><span>01 BOM 업로드</span><i>→</i><span>02 조건 설정</span><i>→</i><span>03 계획 완성</span></div></div>
+      <div id="result-content" hidden>
+        <div class="metrics"><div class="metric"><span>총 발주 수량</span><strong id="metric-bars"></strong><small id="metric-groups"></small></div><div class="metric"><span>전체 로스율</span><strong id="metric-loss" class="teal"></strong><small>잔재 + 절단날 손실 포함</small></div><div class="metric"><span>총 잔재 길이</span><strong id="metric-remnant"></strong><small>모든 원자재의 잔재 합계</small></div><div class="metric"><span>생산 부재 수량</span><strong id="metric-pieces"></strong><small id="metric-time"></small></div></div>
+        <div class="card result-card"><div class="tabs" role="tablist"><button id="tab-orders" class="tab active" role="tab" aria-selected="true" aria-controls="orders-view">발주 원자재 목록 <span id="orders-count"></span></button><button id="tab-patterns" class="tab" role="tab" aria-selected="false" aria-controls="patterns-view">CUTTING PLAN <span id="patterns-count"></span></button></div>
+          <div id="orders-view" role="tabpanel" aria-labelledby="tab-orders"><div class="table-scroll"><table><thead><tr><th>재질</th><th>규격</th><th class="numeric">발주 길이 (mm)</th><th class="numeric">수량 (본)</th><th class="numeric">총 발주 길이 (mm)</th><th class="numeric">로스율</th></tr></thead><tbody id="orders-body"></tbody></table></div><div class="table-foot">로스율 = (총 발주 길이 − 제품 길이) ÷ 총 발주 길이 × 100</div></div>
+          <div id="patterns-view" role="tabpanel" aria-labelledby="tab-patterns" hidden><div class="plan-toolbar"><span>같은 조합은 반복 본수로 묶었습니다. 표시 길이는 1본 기준입니다.</span><div><i class="legend product"></i> 제품 <i class="legend kerf"></i> 날 손실 <i class="legend rest"></i> 잔재</div></div><div id="patterns-list"></div></div>
+        </div>
+        <details class="solver-details"><summary>계산 조건 및 그룹별 최적화 상태</summary><p id="result-settings"></p><ul id="solver-status"></ul><p>최적해 미확정은 사용 가능한 조합이며, 더 나은 조합이 존재할 수 있습니다. 발주 본수를 먼저 최소화하므로 원자재 가격을 최소화하는 계획과는 다를 수 있습니다.</p></details>
+      </div>
+    </section>
+    <footer class="page-footer"><span>STEEL PLAN — 철골 제작을 위한 더 명확한 계획</span><span>결과는 서버 메모리에 최대 1시간 보관됩니다. 필요한 파일을 저장해 주세요.</span></footer>
+  </div>
+</main>
+<div id="busy" class="busy-overlay" hidden><div class="busy-box"><div class="spinner"></div><h3 id="busy-title">처리 중입니다</h3><p id="busy-description">잠시만 기다려 주세요.</p></div></div>
+</body>
+</html>
