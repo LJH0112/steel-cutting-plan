@@ -14,10 +14,12 @@ DIM = rf'[xX×*]{NUMBER}'
 SECTION_PATTERNS = (
     ('H빔', rf'H-?{NUMBER}(?:{DIM}){{0,3}}'),
     ('각파이프', rf'P-?{NUMBER}(?:{DIM}){{2}}'),
+    ('각파이프', rf'TS-?{NUMBER}(?:{DIM}){{2}}'),
     ('잔넬', rf'\[{NUMBER}(?:{DIM}){{3}}\]?'),
     ('앵글', rf'L-?{NUMBER}(?:{DIM}){{2}}'),
     ('C형강', rf'C-?{NUMBER}(?:{DIM}){{3}}'),
     ('환봉', rf'D{NUMBER}'),
+    ('환봉', rf'ROD{NUMBER}'),
 )
 
 

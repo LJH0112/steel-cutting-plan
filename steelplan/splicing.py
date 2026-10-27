@@ -58,7 +58,8 @@ def optimize_with_splices(request, settings):
         if tail:
             tails.append(BOMItem(**{**row, 'length': Decimal(tail) / 1000, 'weight': ''}))
             cut_bom.append({**row, **meta, 'length': str(Decimal(tail) / 1000), 'role': '연결재', 'quantity': item.quantity})
-        assemblies.append({'row': item.source_row, 'title': item.title, 'material': item.material, 'spec': item.spec,
+        assemblies.append({'row': item.source_row, 'input_index': item.input_index,
+                           'title': item.title, 'material': item.material, 'spec': item.spec,
                            'quantity': item.quantity, 'finished_length': float(item.length), 'base_length': 6000,
                            'whole_bars_per_part': full, 'connector_length': mm(tail) if tail else 6000,
                            'tail_connector_count': int(bool(tail)), 'whole_connector_count': full - 1,

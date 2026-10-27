@@ -1,16 +1,12 @@
 """Print the shared report tables without changing the calculation engine."""
 import io
 from pathlib import Path
-from xml.sax.saxutils import escape
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A3, A4, landscape
-from reportlab.lib.styles import ParagraphStyle
+from openpyxl.utils import get_column_letter
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 
 from .reports import MATERIAL_COLUMNS, COMBINATION_COLUMNS, build_report, combination_rows
 
@@ -31,21 +27,32 @@ def paper(value):
     return value
 
 
-def styled_sheet(wb, title, headers, rows, widths, paper_size='A4'):
+def styled_sheet(wb, title, headers, rows, widths, paper_size='A4', orientation='portrait', report_title=None, metadata=None):
     ws = wb.create_sheet(title)
+    if report_title:
+        meta = metadata or {}
+        ws.append([report_title]); ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
+        ws.append(['[공 사 명] ' + meta.get('project_name', '')]); ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(headers)-2)
+        ws.cell(2,len(headers)-1,'[날 짜] ' + meta.get('report_date','')); ws.merge_cells(start_row=2, start_column=len(headers)-1, end_row=2, end_column=len(headers))
+        ws.append(['[공사구분] ' + meta.get('project_section', '')]); ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=len(headers))
     ws.append(headers)
+    header_row = ws.max_row
     for row in rows:
         ws.append([safe_cell(v) for v in row])
-    ws.freeze_panes = 'A2'
+    ws.freeze_panes = f'A{header_row+1}'
     ws.sheet_view.showGridLines = False
-    ws.auto_filter.ref = ws.dimensions
-    ws.print_title_rows = '1:1'
+    ws.auto_filter.ref = f'A{header_row}:{ws.cell(ws.max_row,len(headers)).coordinate}'
+    ws.print_title_rows = f'1:{header_row}'
     ws.sheet_properties.pageSetUpPr.fitToPage = True
-    ws.page_setup.orientation = 'landscape'
+    if orientation not in ('portrait','landscape'):
+        raise ValueError('인쇄 방향은 portrait 또는 landscape여야 합니다.')
+    ws.page_setup.orientation = orientation
     ws.page_setup.paperSize = ws.PAPERSIZE_A3 if paper(paper_size) == 'A3' else ws.PAPERSIZE_A4
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 0
-    ws.oddFooter.center.text = 'STEELPLAN  |  &P / &N'
+    ws.oddFooter.left.text = '[파 일 명] ' + (metadata or {}).get('source_filename', '').replace('&','&&')
+    ws.oddFooter.right.text = '&P / &N'
+    ws.oddFooter.center.text = 'STEELPLAN'
     ws.oddFooter.center.size = 9
     for row in ws:
         for c in row:
@@ -53,12 +60,24 @@ def styled_sheet(wb, title, headers, rows, widths, paper_size='A4'):
             c.alignment = Alignment(vertical='center', wrap_text=True)
             if isinstance(c.value, (float, int)):
                 c.number_format = '#,##0.###'
-    for cell in ws[1]:
-        cell.font = Font(name='맑은 고딕', bold=True, color='FFFFFF')
-        cell.fill = PatternFill('solid', fgColor='087F6B')
-    ws.row_dimensions[1].height = 26
+    for cell in ws[header_row]:
+        cell.font = Font(name='맑은 고딕', bold=False, color='000000')
+        cell.fill = PatternFill('solid', fgColor='FFFF00')
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        cell.border = Border(top=Side(style='thin'),bottom=Side(style='thin'),left=Side(style='thin'),right=Side(style='thin'))
+    for row in ws.iter_rows(min_row=header_row+1):
+        for c in row:
+            c.border=Border(left=Side(style='hair'),right=Side(style='hair'))
+    ws.row_dimensions[header_row].height=24
+    if report_title:
+        ws.cell(1,1).font=Font(name='맑은 고딕',size=20)
+        ws.cell(1,1).alignment=Alignment(horizontal='center')
+        ws.row_dimensions[1].height=38
+        ws.row_dimensions[2].height=22
+        ws.row_dimensions[3].height=22
+    if not report_title: ws.row_dimensions[1].height = 26
     for i, width in enumerate(widths, 1):
-        ws.column_dimensions[ws.cell(1, i).column_letter].width = width
+        ws.column_dimensions[get_column_letter(i)].width = width
     return ws
 
 
@@ -75,44 +94,46 @@ def summary_text(plan, report):
 
 def notes_text(plan):
     basis = {'unspecified': '미지정(공란)', 'row_total': 'WEIGHT.KG 행 전체 중량', 'per_piece': 'WEIGHT.KG 개당 중량'}[plan['settings'].get('weight_basis', 'unspecified')]
-    return (f"단위 mm, kg. 원자재 행의 조합길이·잔철은 수량 전체 합계; 소계·합계의 길이는 총 발주 길이. "
+    return (f"단위 mm, kg. 원자재의 조합길이·중량·잔철·사용율은 규격 소계에 표시; 소계·합계의 길이는 총 발주 길이. "
             f"사용율=제작 절편 길이/발주 길이×100. 총 로스율은 잔철+날 손실 기준. "
             f"원자재 중량은 단위중량 미제공으로 공란. 조합중량 해석: {basis}; 누락·오류가 있으면 소계도 공란. "
             f"조합 리스트의 조합길이·잔철·등분은 1본 기준; 총수량=등분×원자재 수량. 비고 수량은 총수량 기준.")
 
 
-def export_xlsx(plan, paper_size='A4'):
+def export_xlsx(plan, paper_size='A4', orientation='portrait'):
     paper(paper_size)
     report = plan.get('report') or build_report(plan)
     wb = Workbook(); wb.remove(wb.active)
+    meta = plan.get('report_metadata', {})
     ws = styled_sheet(wb, '원자재 리스트', [label for _, label in MATERIAL_COLUMNS],
-                      [[row[key] for key, _ in MATERIAL_COLUMNS] for row in report['material_rows']],
-                      [18, 34, 18, 12, 20, 22, 22, 20, 16], paper_size)
-    for index, row in enumerate(report['material_rows'], 2):
+                      [[row[key] for key, _ in MATERIAL_COLUMNS] for row in report['material_display_rows']],
+                      [12, 26, 15, 10, 18, 18, 18, 14, 12, 18], paper_size, orientation, '원자재 물량 집계표', meta)
+    for index, row in enumerate(report['material_display_rows'], 5):
         if row['kind'] != 'detail':
             for cell in ws[index]:
                 cell.font = Font(name='맑은 고딕', bold=True, size=10)
-                cell.fill = PatternFill('solid', fgColor='DDEDE5' if row['kind'] == 'grand_total' else 'F0F5F2')
-                cell.border = Border(top=Side(style='thin', color='B8CCC0'))
+                cell.fill = PatternFill('solid', fgColor='FFFF00')
+                cell.border = Border(top=Side(style='thin'), bottom=Side(style='thin'), left=Side(style='thin'), right=Side(style='thin'))
+            ws.cell(index, 2).alignment = Alignment(horizontal='center')
     ws.append([summary_text(plan, report)])
-    ws.merge_cells(start_row=ws.max_row, start_column=1, end_row=ws.max_row, end_column=9)
+    ws.merge_cells(start_row=ws.max_row, start_column=1, end_row=ws.max_row, end_column=10)
     ws.row_dimensions[ws.max_row].height = 32
     ws.cell(ws.max_row, 1).alignment = Alignment(wrap_text=True)
     ws.append([notes_text(plan)])
-    ws.merge_cells(start_row=ws.max_row, start_column=1, end_row=ws.max_row, end_column=9)
+    ws.merge_cells(start_row=ws.max_row, start_column=1, end_row=ws.max_row, end_column=10)
     ws.row_dimensions[ws.max_row].height = 45
     ws.cell(ws.max_row, 1).alignment = Alignment(wrap_text=True)
     combo = styled_sheet(wb, '조합 리스트', [label for _, label in COMBINATION_COLUMNS], [],
-                         [12, 18, 12, 20, 18, 16, 18, 12, 14, 70], paper_size)
+                         [9, 13, 9, 15, 12, 12, 13, 9, 12, 17, 32], paper_size, orientation, '조합 리스트', meta)
     for group in report['combination_groups']:
-        combo.append([f"{group['material']} / {group['spec']} / {group['material_type']}"])
+        combo.append([f"[재질] {group['material']}   [규격] {group['spec']}   [단위중량]"])
         group_row = combo.max_row
-        combo.merge_cells(start_row=group_row, start_column=1, end_row=group_row, end_column=10)
-        combo.cell(group_row, 1).fill = PatternFill('solid', fgColor='E5EEE8')
+        combo.merge_cells(start_row=group_row, start_column=1, end_row=group_row, end_column=11)
+        combo.cell(group_row, 1).fill = PatternFill('solid', fgColor='FFFFFF')
         combo.cell(group_row, 1).font = Font(name='맑은 고딕', bold=True)
         for pattern in group['patterns']:
             start = combo.max_row + 1
-            for row in combination_rows(pattern):
+            for row in combination_rows(pattern, max_note_chars=200):
                 combo.append([safe_cell(row[key]) for key, _ in COMBINATION_COLUMNS])
             end = combo.max_row
             for col in range(1, 7):
@@ -122,8 +143,17 @@ def export_xlsx(plan, paper_size='A4'):
                 for cell in row:
                     cell.alignment = Alignment(vertical='center', wrap_text=True)
                     cell.font = Font(name='맑은 고딕', size=10)
+                    cell.border = Border(left=Side(style='thin'),right=Side(style='thin'))
                     if isinstance(cell.value, (float, int)): cell.number_format = '#,##0.###'
-    combo.auto_filter.ref = f'A1:J{combo.max_row}'
+                text_length=len(str(row[-1].value or ''))
+                combo.row_dimensions[row[0].row].height=max(22, min(140, 14*((text_length+24)//25)))
+            for cell in combo[end]:
+                cell.border=Border(left=Side(style='thin'),right=Side(style='thin'),bottom=Side(style='thin'))
+        combo.append([safe_cell(group['total'][key]) for key,_ in COMBINATION_COLUMNS])
+        for cell in combo[combo.max_row]:
+            cell.fill=PatternFill('solid',fgColor='FFFF00')
+            cell.border=Border(top=Side(style='thin'),bottom=Side(style='thin'),left=Side(style='thin'),right=Side(style='thin'))
+    combo.auto_filter.ref = f'A4:K{combo.max_row}'
     styled_sheet(wb, 'BOM', ['재질', '규격', '길이 (mm)', '수량', '자재 종류', '원본 행', '부재 번호 (TITLE)',
                             '부재 분류 (ITEM)', 'WEIGHT.KG', 'PAINT.M', '계산 여부'],
                  [[i['material'], i['spec'], float(i['length']), i['quantity'], i.get('material_type', ''),
@@ -134,7 +164,7 @@ def export_xlsx(plan, paper_size='A4'):
     settings = [['요약', summary_text(plan, report)], ['설명', notes_text(plan)],
                 ['절단날 손실 (mm/개)', cfg['kerf']], ['절단 후 잔재', '>30mm; 무절단 이음 통재는 절단 대상 아님'],
                 ['계산 상태', '최적해 증명' if plan['summary']['optimal'] else '실행 가능 계획 / 최적해 미확정'],
-                ['인쇄 용지', paper_size + ' 가로']]
+                ['인쇄 용지', paper_size + (' 세로' if orientation=='portrait' else ' 가로')]]
     settings.extend([kind + ' 발주 길이', ', '.join(f'{v:g}' for v in values)] for kind, values in cfg.get('stock_lengths_by_type', {}).items())
     settings.extend([f"{r['material']} / {r['spec']}", r['detail']] for r in plan['statuses'])
     if plan.get('splices'):
@@ -156,78 +186,20 @@ def export_xlsx(plan, paper_size='A4'):
         styled_sheet(wb, '잔재 재사용', ['원본 행', '부재 번호', '재질', '규격', '연결재 길이', '수량', '원자재 패턴', '사용 전 잔재', '사용 후 잔재'],
                      [[a.get(k) for k in ('row', 'title', 'material', 'spec', 'length', 'quantity', 'pattern_id', 'before', 'after')]
                       for a in plan['remnant_reuse']], [12, 22, 18, 32, 20, 12, 20, 20, 20], paper_size)
+    styled_sheet(wb, '수량 검증', ['원본 행','부재 번호','재질','규격','BOM 수량','계획 완성 수량','제외 수량','제작 절편 수량','판정'],
+        [[r[k] for k in ('row','title','material','spec','required_quantity','planned_quantity','excluded_quantity','component_quantity','status')]
+         for r in report['reconciliation']], [12,24,18,32,16,18,16,18,22], paper_size, orientation)
+    for sheet in wb:
+        sheet.page_setup.orientation=orientation
     output = io.BytesIO(); wb.save(output)
     return output.getvalue()
 
 
-def export_pdf(plan, paper_size='A4'):
-    page_size = landscape(A3 if paper(paper_size) == 'A3' else A4)
+def export_pdf(plan, paper_size='A4', orientation='portrait', section='all'):
+    from .pdf_report import render_pdf
+    paper(paper_size)
     report = plan.get('report') or build_report(plan)
-    output = io.BytesIO()
-    doc = SimpleDocTemplate(output, pagesize=page_size, rightMargin=25, leftMargin=25,
-                            topMargin=26, bottomMargin=32, title='STEELPLAN 원자재 리스트 · 조합 리스트')
-    width = page_size[0] - 50
-    body = ParagraphStyle('body', fontName=FONT, fontSize=8 if paper_size == 'A4' else 10, leading=12, wordWrap='CJK')
-    heading = ParagraphStyle('heading', parent=body, fontSize=14, leading=20, spaceBefore=8, spaceAfter=8)
-    def p(value, style=body):
-        return Paragraph(escape('' if value is None else str(value)).replace('\n', '<br/>'), style)
-    def display(value):
-        return f'{value:,.3f}'.rstrip('0').rstrip('.') if isinstance(value, float) else value
-    def table(headers, rows, proportions, extra=(), group_title=None):
-        data = [[p(c) for c in headers]] + [[p(display(c)) for c in row] for row in rows]
-        offset = int(group_title is not None)
-        if group_title is not None:
-            data.insert(0, [p(group_title)] + [''] * (len(headers) - 1))
-        shifted = [(command, (start[0], start[1] + offset), (end[0], end[1] + offset), *values)
-                   for command, start, end, *values in extra]
-        t = Table(data, colWidths=[width * v / sum(proportions) for v in proportions], repeatRows=1+offset,
-                  hAlign='LEFT', splitByRow=1, splitInRow=1)
-        t.setStyle(TableStyle([('BACKGROUND', (0,0),(-1,offset),colors.HexColor('#dfece5')),
-            ('VALIGN',(0,0),(-1,-1),'TOP'), ('LEFTPADDING',(0,0),(-1,-1),5),
-            ('RIGHTPADDING',(0,0),(-1,-1),5), ('TOPPADDING',(0,0),(-1,-1),5),
-            ('BOTTOMPADDING',(0,0),(-1,-1),5),
-            ('LINEBELOW',(0,0),(-1,0),.6,colors.HexColor('#658473')),
-            ('INNERGRID',(0,0),(-1,-1),.2,colors.HexColor('#dae2dc')), *shifted,
-            *([('SPAN',(0,0),(-1,0))] if offset else [])]))
-        return t
-    story = [p('원자재 리스트', heading), p(summary_text(plan, report)), Spacer(1,8)]
-    raw_rows = [[r[k] for k, _ in MATERIAL_COLUMNS] for r in report['material_rows']]
-    shading = [('BACKGROUND',(0,i),(-1,i),colors.HexColor('#edf3ef')) for i,r in enumerate(report['material_rows'],1) if r['kind']!='detail']
-    story += [table([l for _,l in MATERIAL_COLUMNS], raw_rows, [60,165,65,45,70,80,80,65,65], shading), Spacer(1,8), p(notes_text(plan))]
-    story += [PageBreak(), p('조합 리스트', heading), p(summary_text(plan, report)), p('동일 패턴은 수량으로 묶음. 조합길이·잔철·등분은 1본 기준, 총수량=등분×수량. 비고는 원본 BOM 번호와 배정 총수량.')]
-    if plan.get('splices'):
-        status = '검토 필요 · 이음 위치/상세 승인 전 제작 확정 아님' if plan['splice_summary']['review_required'] else '이음 상세 사용자 승인 입력됨'
-        story += [p(status, heading), p(f"무절단 6m 통재 {plan['splice_summary']['whole_stock_bars']}본; 잔재 연결재 {plan['splice_summary']['reused_connectors']}개; 연결재 추가 발주 {plan['splice_summary']['extra_connector_stock_bars']}본. 이음 여유 {plan['settings']['splice_allowance']}mm/이음, 합계 {plan['summary']['total_splice_allowance']}mm; 날 손실과 별도.")]
-        story.append(table(['부재 번호','규격','완성 길이','수량','본재 길이','연결재 길이','이음 수/부재','상태'],
-            [[a['title'],a['spec'],a['finished_length'],a['quantity'],a['base_length'],a['connector_length'],a['joint_count'],a['status']] for a in plan['splices']],
-            [90,170,65,40,65,65,60,130]))
-    for group in report['combination_groups']:
-        story += [Spacer(1,8)]
-        rows, shading = [], []
-        for pattern in group['patterns']:
-            start = len(rows) + 1
-            for index, r in enumerate(combination_rows(pattern)):
-                rows.append([r[k] if index == 0 or col == 0 or col >= 6 else None for col,(k,_) in enumerate(COMBINATION_COLUMNS)])
-            end = len(rows)
-            if pattern['number'] % 2:
-                shading.append(('BACKGROUND',(0,start),(-1,end),colors.HexColor('#f3f6f4')))
-            shading.append(('LINEBELOW',(0,end),(-1,end),.7,colors.HexColor('#a5baad')))
-        story.append(table([l for _,l in COMBINATION_COLUMNS], rows, [34,60,40,75,60,60,65,40,50,190], shading,
-                           group_title=f"{group['material']} / {group['spec']} / {group['material_type']}"))
-    story += [Spacer(1,10), p('계산 제외 부재', heading)]
-    if report['excluded']:
-        story.append(table(['원본 행','부재 번호','규격','절단 길이','수량','제외 사유'],
-            [[e['row'],e['title'],e['spec'],float(e['length']),e['quantity'],e['display_reason']] for e in report['excluded']], [45,100,180,80,40,230]))
-    else:
-        story.append(p('계산 제외 부재 없음. 6m 초과 각파이프는 이음 제작 검토에 포함합니다.'))
-    story += [p('계산 조건', heading), p(notes_text(plan)), p(f"날 손실 {plan['settings']['kerf']}mm/개. 절단 후 잔재 >30mm. 통재 본재/통재 연결재는 무절단이므로 날 손실·잔재 0mm. 잔재는 동일 재질·규격만 재사용하며, 연결재 절단 후에도 >30mm를 남깁니다.")]
-    story.extend(p(f"{r['material']} / {r['spec']}: {r['detail']}") for r in plan['statuses'])
-    def footer(canvas, document):
-        canvas.setFont(FONT,8); canvas.setFillColor(colors.HexColor('#667c6e'))
-        canvas.drawString(25,16,'STEELPLAN | 단위 mm, kg | '+paper_size+' 가로')
-        canvas.drawRightString(page_size[0]-25,16,f'{document.page}')
-    doc.build(story,onFirstPage=footer,onLaterPages=footer)
-    return output.getvalue()
+    return render_pdf(plan, report, summary_text(plan, report), notes_text(plan), paper_size, orientation, section)
 
 
 def sample_xlsx():

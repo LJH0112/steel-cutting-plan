@@ -36,8 +36,8 @@ def pattern_plan(**extra):
 def test_exact_columns_subtotals_and_merged_excel_patterns():
     p = pattern_plan()
     report = p['report']
-    assert [c['label'] for c in report['material_columns']] == ['재질', '규격', '길이', '수량', '총중량 kg', '조합길이', '조합중량 kg', '잔철', '사용율 %']
-    assert [c['label'] for c in report['combination_columns']] == ['번호', '원자재', '수량', '조합길이', '잔철', '사용율 %', '길이', '등분', '총수량', '비고']
+    assert [c['label'] for c in report['material_columns']] == ['재질', '규격', '길이', '수량', '총중량,KG', '조합길이', '조합중량,KG', '잔철', '사용율', '비고']
+    assert [c['label'] for c in report['combination_columns']] == ['번호', '원자재', '수량', '조합길이', '잔철', '사용율', '길이', '등분', '총수량', '총중량,KG', '비고']
     detail, subtotal, total = report['material_rows']
     assert detail['quantity'] == subtotal['quantity'] == total['quantity'] == 3
     assert detail['length'] == 6000 and subtotal['length'] == total['length'] == 18000
@@ -53,11 +53,11 @@ def test_exact_columns_subtotals_and_merged_excel_patterns():
         for a in c['allocations']: allocations[a['title']] += a['quantity']
     assert allocations == {'A-01': 2, 'B-01': 1, 'C-01': 3}
     wb = load_workbook(io.BytesIO(export_xlsx(p)))
-    assert [c.value for c in wb['원자재 리스트'][1]] == [label for _, label in MATERIAL_COLUMNS]
-    assert [c.value for c in wb['조합 리스트'][1]] == [label for _, label in COMBINATION_COLUMNS]
-    assert any(str(r) == 'A3:A4' for r in wb['조합 리스트'].merged_cells.ranges)
-    assert sum(r[8] or 0 for r in wb['조합 리스트'].iter_rows(min_row=2, values_only=True)) == 6
-    assert wb['원자재 리스트']['E2'].value is None
+    assert [c.value for c in wb['원자재 리스트'][4]] == [label for _, label in MATERIAL_COLUMNS]
+    assert [c.value for c in wb['조합 리스트'][4]] == [label for _, label in COMBINATION_COLUMNS]
+    assert any(str(r) == 'A6:A7' for r in wb['조합 리스트'].merged_cells.ranges)
+    assert sum(r[8] or 0 for r in wb['조합 리스트'].iter_rows(min_row=5, values_only=True) if r[0] != '합 계') == 6
+    assert wb['원자재 리스트']['E5'].value is None
 
 
 @pytest.mark.parametrize(('basis', 'expected'), [('unspecified', None), ('row_total', 325), ('per_piece', 675)])
@@ -82,14 +82,18 @@ def test_report_refuses_missing_or_extra_pieces():
         build_report(broken)
 
 
-@pytest.mark.parametrize(('size', 'width', 'height'), [('A4', 841.89, 595.28), ('A3', 1190.55, 841.89)])
-def test_paper_sizes_print_titles_and_page_numbers(size, width, height):
+@pytest.mark.parametrize(('size', 'width', 'height'), [('A4', 595.28, 841.89), ('A3', 841.89, 1190.55)])
+@pytest.mark.parametrize('orientation', ['portrait','landscape'])
+def test_paper_sizes_print_titles_and_page_numbers(size, width, height, orientation):
+    if orientation == "landscape": width,height=height,width
     p = pattern_plan()
-    wb = load_workbook(io.BytesIO(export_xlsx(p, size)))
-    assert all(ws.page_setup.orientation == 'landscape' and ws.print_title_rows == '$1:$1' for ws in wb)
+    wb = load_workbook(io.BytesIO(export_xlsx(p, size, orientation)))
+    assert all(ws.page_setup.orientation == orientation for ws in wb)
+    assert wb['원자재 리스트'].print_title_rows == '$1:$4'
+    assert wb['BOM'].print_title_rows == '$1:$1'
     assert all(str(ws.page_setup.paperSize) == ('8' if size == 'A3' else '9') for ws in wb)
-    assert '&P' in wb['조합 리스트'].oddFooter.center.text
-    pdf = export_pdf(p, size)
+    assert '&P' in wb['조합 리스트'].oddFooter.right.text
+    pdf = export_pdf(p, size, orientation)
     media = re.search(rb'/MediaBox\s*\[([^\]]+)\]', pdf)
     assert media
     values = [float(x) for x in media.group(1).split()]
@@ -108,16 +112,16 @@ def test_real_format_sample_bom_and_export_quantities_match():
     validation = validate_plan_input(req, settings)
     p = plan_by_material(req.model_copy(update={'exclude_invalid': True, 'exclusion_token': validation['exclusion_token']}), settings)
     assert p['summary']['input_piece_count'] == 17
-    assert p['summary']['piece_count'] == 15 and p['summary']['excluded_piece_count'] == 2
+    assert p['summary']['piece_count'] == 16 and p['summary']['excluded_piece_count'] == 1
     output = sum(c['total_quantity'] for g in p['report']['combination_groups'] for pat in g['patterns'] for c in pat['cuts'])
-    assert output == 15
+    assert output == 17
     wb = load_workbook(io.BytesIO(export_xlsx(p)))
-    assert sum(row[8] or 0 for row in wb['조합 리스트'].iter_rows(min_row=2, values_only=True)) == output
+    assert sum(row[8] or 0 for row in wb['조합 리스트'].iter_rows(min_row=5, values_only=True) if row[0] != '합 계') == output
 
 
-def test_default_does_not_split_or_weld_long_pipe():
+def test_explicit_strict_mode_does_not_split_or_weld_long_pipe():
     with pytest.raises(PlanningIssues) as error:
-        plan([part(6184, title='LONG', source_row=8), part(2000, title='NORMAL')])
+        plan([part(6184, title='LONG', source_row=8), part(2000, title='NORMAL')], enable_splice_planning=False)
     assert error.value.issues[0]['code'] == 'STOCK_LENGTH_EXCEEDED'
     assert error.value.issues[0]['row'] == 8 and error.value.issues[0]['quantity'] == 1
     assert error.value.issues[0]['length'] == '6184'
@@ -202,9 +206,9 @@ def test_pdf_text_contains_headers_source_ids_and_exceptions(tmp_path):
     p = pattern_plan()
     pdf = tmp_path / 'output.pdf'; pdf.write_bytes(export_pdf(p))
     extracted = subprocess.check_output(['pdftotext', '-layout', str(pdf), '-'], text=True)
-    assert '원자재 리스트' in extracted and '조합 리스트' in extracted
+    assert '원자재 물량 집계표' in extracted and '조합 리스트' in extracted
     assert 'A-01' in extracted and 'B-01' in extracted and 'C-01' in extracted
-    assert '사용율' in extracted and '등분' in extracted and '전체 합계' in extracted
+    assert '사용율' in extracted and '등분' in extracted and '합계' in ''.join(extracted.split())
 
 
 def test_long_pdf_repeats_section_and_headers_without_losing_bom_numbers(tmp_path):
@@ -212,9 +216,9 @@ def test_long_pdf_repeats_section_and_headers_without_losing_bom_numbers(tmp_pat
     p = plan([part(3000 if i < 50 else 2000, title=f'BOM-{i:03d}-' + '긴부재번호' * 10)
               for i in range(100)])
     path = tmp_path / 'long.pdf'; path.write_bytes(export_pdf(p))
-    text = subprocess.check_output(['pdftotext', str(path), '-'], text=True)
+    text = subprocess.check_output(['pdftotext', '-layout', str(path), '-'], text=True)
     compact = ''.join(text.split())
-    assert compact.count('SS275/P100*100*4/각파이프') >= 2
+    assert compact.count('[재질]SS275[규격]P100*100*4[단위중량]') >= 2
     assert all(f'BOM-{i:03d}' in text for i in range(100))
     assert p['report']['output_piece_count'] == 100
 

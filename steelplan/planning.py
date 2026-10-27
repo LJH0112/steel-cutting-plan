@@ -66,14 +66,17 @@ def plan_by_material(request, settings):
     eligible, _ = assess_items(request.items, request.kerf, settings, request.enable_splice_planning)
     if not eligible:
         raise ValueError('계산 가능한 정상 부재가 없습니다. 예외 목록과 관리자 설정을 확인해 주세요.')
+    excluded_indices = {issue['input_index'] for issue in issues}
+    eligible = [item.model_copy(update={'input_index': index}) for index, item in enumerate(request.items)
+                if index not in excluded_indices]
     if request.enable_splice_planning:
         plan = optimize_with_splices(request.model_copy(update={'items': eligible}), settings)
     else:
         plan = optimize(request.model_copy(update={'items': eligible}), settings.stock_lengths_by_type)
     plan['excluded'] = issues
     plan['bom'] = [item.model_dump(mode='json') for item in request.items]
-    excluded_indices = {issue['input_index'] for issue in issues}
     for index, item in enumerate(plan['bom']):
+        item['input_index'] = index
         item['included'] = index not in excluded_indices
         item['material_type'] = classify_material(item['spec']) or '미지원 자재'
     plan['summary'].update(input_rows=len(request.items), input_piece_count=sum(i.quantity for i in request.items),
@@ -81,5 +84,7 @@ def plan_by_material(request, settings):
     if plan['summary']['piece_count'] + plan['summary']['excluded_piece_count'] != plan['summary']['input_piece_count']:
         raise RuntimeError('완성 부재 수량 검증 실패')
     plan['settings']['weight_basis'] = request.weight_basis
+    plan['report_metadata'] = {'project_name': request.project_name, 'project_section': request.project_section,
+                              'source_filename': request.source_filename, 'report_date': request.report_date.isoformat()}
     plan['report'] = build_report(plan)
     return plan

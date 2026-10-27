@@ -1,4 +1,5 @@
 from decimal import Decimal, InvalidOperation
+from datetime import date, datetime, timedelta, timezone
 import re
 from typing import Literal
 
@@ -30,6 +31,7 @@ class BOMItem(BaseModel):
     item_class: str = Field(default='', max_length=150)
     weight: str = Field(default='', max_length=100)
     paint_area: str = Field(default='', max_length=100)
+    input_index: int | None = Field(default=None, ge=0, le=999)
 
     @field_validator('material', 'spec', mode='before')
     @classmethod
@@ -60,7 +62,18 @@ class OptimizeRequest(BaseModel):
     splice_allowance: Decimal = Field(default=Decimal('5'), ge=0, le=1000)
     reusable_remnant_min: Decimal = Field(default=Decimal('5'), ge=0, le=100000)
     splice_details_approved: bool = Field(default=False, strict=True)
-    enable_splice_planning: bool = Field(default=False, strict=True)
+    enable_splice_planning: bool = Field(default=True, strict=True)
+    project_name: str = Field(default='', max_length=200)
+    project_section: str = Field(default='', max_length=200)
+    source_filename: str = Field(default='', max_length=250)
+    report_date: date = Field(default_factory=lambda: datetime.now(timezone(timedelta(hours=9))).date())
+
+    @field_validator('project_name', 'project_section', 'source_filename')
+    @classmethod
+    def validate_report_text(cls, value):
+        if re.search(r'[\x00-\x1f\x7f]', value):
+            raise ValueError('보고서 정보에 줄바꿈이나 제어 문자를 사용할 수 없습니다.')
+        return value.strip()
 
     @field_validator('stock_lengths', mode='before')
     @classmethod

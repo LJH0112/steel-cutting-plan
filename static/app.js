@@ -180,7 +180,7 @@ $('preview').addEventListener('click', async () => {
 $('kerf').addEventListener('input', revalidate);
 ['splice-allowance', 'reuse-min'].forEach(id => $(id).addEventListener('input', revalidate));
 $('enable-splice').addEventListener('change', revalidate);
-['splice-approved', 'weight-basis'].forEach(id => $(id).addEventListener('change', clearResults));
+['splice-approved', 'weight-basis', 'project-name', 'project-section', 'report-date'].forEach(id => $(id).addEventListener('change', clearResults));
 $('time-limit').addEventListener('input', clearResults);
 $('exclude-invalid').addEventListener('change', () => { clearResults(); updateCalculateButton(); });
 $('optimize').addEventListener('click', async () => {
@@ -194,7 +194,7 @@ $('optimize').addEventListener('click', async () => {
       body: JSON.stringify({items: state.items, kerf, time_limit: Number($('time-limit').value), exclude_invalid: $('exclude-invalid').checked, exclusion_token: state.exclusionToken,
         splice_allowance: $('splice-allowance').value, reusable_remnant_min: $('reuse-min').value,
         splice_details_approved: $('splice-approved').checked, enable_splice_planning: $('enable-splice').checked,
-        weight_basis: $('weight-basis').value})});
+        weight_basis: $('weight-basis').value, project_name: $('project-name').value, project_section: $('project-section').value, source_filename: state.file?.name || '', ...($('report-date').value ? {report_date: $('report-date').value} : {})})});
     renderResult();
     $('results-section').scrollIntoView({behavior: 'smooth', block: 'start'});
   } catch (e) { if (e.data?.issues) applyValidation(e.data); error(e.message); }
@@ -219,9 +219,15 @@ function renderResult() {
   $('patterns-count').textContent = result.patterns.length;
   $('physical-count').textContent = `제작 절편 ${fmt(report.output_piece_count)}개`;
   $('orders-head').innerHTML = '<tr>' + report.material_columns.map(c => `<th>${esc(c.label)}</th>`).join('') + '</tr>';
-  $('orders-body').innerHTML = report.material_rows.map(row => `<tr class="${row.kind}">${report.material_columns.map((c, i) => `<td class="${i > 1 ? 'numeric' : ''}">${reportCell(row[c.key])}</td>`).join('')}</tr>`).join('');
+  $('orders-body').innerHTML = report.material_display_rows.map(row => `<tr class="${row.kind}">${report.material_columns.map((c, i) => `<td class="${i > 1 ? 'numeric' : ''}">${reportCell(row[c.key])}</td>`).join('')}</tr>`).join('');
   $('patterns-list').innerHTML = report.combination_groups.map(group => combinationGroupHTML(group, report.combination_columns)).join('');
   renderSplices(result);
+  const meta = result.report_metadata || {};
+  for (const [id,title] of [['materials-project-header','원자재 물량 집계표'], ['combinations-project-header','조합 리스트']]) {
+    $(id).innerHTML = `<h2>${title}</h2><div><span>[공 사 명] ${esc(meta.project_name || '')}</span><span>[날 짜] ${esc(meta.report_date || '')}</span></div><div><span>[공사구분] ${esc(meta.project_section || '')}</span><span>[파일명] ${esc(meta.source_filename || '')}</span></div>`;
+  }
+  $('quantity-body').innerHTML = report.reconciliation.map(r => `<tr><td>${r.row}</td><td>${esc(r.title)}</td><td>${esc(r.spec)}</td><td>${r.required_quantity}</td><td>${r.planned_quantity}</td><td>${r.excluded_quantity}</td><td>${r.component_quantity}</td><td>${esc(r.status)}</td></tr>`).join('');
+
   $('result-settings').textContent = `${Object.entries(result.settings.stock_lengths_by_type).map(([k,v]) => `${k}: ${v.map(fmt).join(', ')}mm`).join(' / ')} · 날 손실 ${fmt(result.settings.kerf)}mm/개 · 잔재 > 30mm · 총 제품 ${fmt(s.total_parts_length)}mm · 총 날 손실 ${fmt(s.total_kerf_loss)}mm`;
   $('solver-status').innerHTML = result.statuses.map(r => `<li>${esc(r.material)} / ${esc(r.spec)} — ${esc(r.detail)}</li>`).join('');
   $('excluded-summary').textContent = result.excluded.length ? `${result.excluded.length}행 · ${fmt(s.excluded_piece_count)}개 제외 / 입력 ${fmt(s.input_piece_count)}개 = 생산 ${fmt(s.piece_count)}개 + 제외 ${fmt(s.excluded_piece_count)}개. 사용자가 제외를 선택한 부재입니다.` : '계산 제외 부재 없음 · 모든 입력 부재를 계산했습니다.';
@@ -233,15 +239,15 @@ function reportCell(value) {
   return value === null || value === undefined ? '' : typeof value === 'number' ? fmt(value) : esc(value);
 }
 function combinationGroupHTML(group, columns) {
-  const heading = `${esc(group.material)} / ${esc(group.spec)} <small>${esc(group.material_type)}</small>`;
+  const heading = `[재질] ${esc(group.material)}　 [규격] ${esc(group.spec)}　 [단위중량]`;
   const bodies = group.patterns.map(pattern => {
     const rows = pattern.cuts.map((cut, index) => {
       const common = index ? '' : columns.slice(0, 6).map(c => `<td rowspan="${pattern.cuts.length}" class="numeric">${reportCell(pattern[c.key])}</td>`).join('');
-      return `<tr>${common}<td class="numeric">${fmt(cut.length)}</td><td class="numeric">${fmt(cut.split_count)}</td><td class="numeric output-quantity" data-quantity="${cut.total_quantity}">${fmt(cut.total_quantity)}</td><td class="remarks">${esc(cut.remarks)}</td></tr>`;
+      return `<tr>${common}<td class="numeric">${fmt(cut.length)}</td><td class="numeric">${fmt(cut.split_count)}</td><td class="numeric output-quantity" data-quantity="${cut.total_quantity}">${fmt(cut.total_quantity)}</td><td class="numeric">${reportCell(cut.total_weight)}</td><td class="remarks">${esc(cut.remarks)}</td></tr>`;
     }).join('');
     return `<tbody class="pattern-rows" data-pattern="${esc(pattern.id)}">${rows}</tbody>`;
   }).join('');
-  return `<section class="combo-group"><h3>${heading}</h3><div class="table-scroll"><table class="report-table combination-table"><thead><tr>${columns.map(c => `<th>${esc(c.label)}</th>`).join('')}</tr></thead>${bodies}</table></div></section>`;
+  return `<section class="combo-group"><h3>${heading}</h3><div class="table-scroll"><table class="report-table combination-table"><thead><tr>${columns.map(c => `<th>${esc(c.label)}</th>`).join('')}</tr></thead>${bodies}<tfoot><tr class="grand_total">${columns.map(c => `<td>${reportCell(group.total[c.key])}</td>`).join('')}</tr></tfoot></table></div></section>`;
 }
 function renderSplices(result) {
   const assemblies = result.splices || [];
@@ -266,11 +272,11 @@ document.querySelectorAll('[data-format]').forEach(button => button.addEventList
   const format = button.dataset.format;
   busy(true, `${format === 'pdf' ? 'PDF' : '엑셀'} 파일을 준비하고 있습니다`);
   try {
-    const response = await fetch(`/api/results/${state.result.job_id}.${format}?paper_size=${$('paper-size').value}`);
+    const response = await fetch(`/api/results/${state.result.job_id}.${format}?paper_size=${$('paper-size').value}&orientation=${$('paper-orientation').value}&section=${$('pdf-section').value}`);
     if (!response.ok) throw new Error(await responseError(response));
     const url = URL.createObjectURL(await response.blob());
     const link = document.createElement('a');
-    link.href = url; link.download = `steel_cutting_plan.${format}`;
+    link.href = url; link.download = format === 'pdf' && $('pdf-section').value !== 'all' ? `CP_${$('pdf-section').value}.pdf` : `steel_cutting_plan.${format}`;
     document.body.append(link); link.click(); link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 30000);
   } catch (e) { error(e.message); }
@@ -344,3 +350,5 @@ $('save-settings').addEventListener('click', async () => {
   finally { busy(false); }
 });
 api('/api/settings').then(renderSettings).catch(e => error(e.message));
+
+$('report-date').value = new Intl.DateTimeFormat('sv-SE', {timeZone:'Asia/Seoul'}).format(new Date());

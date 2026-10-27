@@ -151,7 +151,7 @@ def test_fixed_length_overflow_requires_explicit_exclusion_and_preserves_identit
     parts = [item('P100*100*4', 6184, 2, source_row=7, title='P-OVER'),
              item('P100*100*4', 2900, 3, source_row=8, title='P-OK'),
              item('PLT12*100', 2000, 1, source_row=9, title='PL-01')]
-    request = OptimizeRequest(items=parts, time_limit=3)
+    request = OptimizeRequest(items=parts, time_limit=3, enable_splice_planning=False)
     with pytest.raises(PlanningIssues) as caught:
         plan_by_material(request, settings())
     exception = caught.value.issues[0]
@@ -180,7 +180,7 @@ def test_fixed_length_overflow_requires_explicit_exclusion_and_preserves_identit
 
 def test_all_excluded_is_not_a_zero_test_success():
     with pytest.raises(ValueError, match='정상 부재가 없습니다'):
-        plan_by_material(confirmed(OptimizeRequest(items=[item('P100*100*4', 6184)]), settings()), settings())
+        plan_by_material(confirmed(OptimizeRequest(items=[item('P100*100*4', 6184)], enable_splice_planning=False), settings()), settings())
 
 
 @pytest.mark.parametrize(('length', 'kerf', 'expected'), [(5970, 0, 'CUTTING_ALLOWANCE'), (5967, 3, 'CUTTING_ALLOWANCE'),
@@ -223,14 +223,14 @@ def test_preview_overflow_not_dropped_and_unsupported_not_guessed():
                        ['PLATE', 'A-3', 'SS275', 'PLT12', 2000, 1], ['합계', None, None, None, None, 4]])
     s = inspect_bom(data)['sheets'][0]
     response = client.post('/api/preview', files={'file': ('ts.xlsx', data)}, data={
-        'sheet': s['name'], 'header_row': 1, 'mapping': json.dumps(s['mapping'])})
+        'sheet': s['name'], 'header_row': 1, 'mapping': json.dumps(s['mapping']), 'enable_splice_planning': 'false'})
     parsed = response.json()
     assert response.status_code == 200
     assert len(parsed['items']) == 3
     assert [e['row'] for e in parsed['issues']] == [2, 4]
     assert [e['code'] for e in parsed['issues']] == ['STOCK_LENGTH_EXCEEDED', 'UNSUPPORTED_MATERIAL']
     assert parsed['eligible_rows'] == 1
-    result = client.post('/api/optimize', json={'items': parsed['items'], 'exclude_invalid': True,
+    result = client.post('/api/optimize', json={'items': parsed['items'], 'exclude_invalid': True, 'enable_splice_planning': False,
                                               'exclusion_token': parsed['exclusion_token']})
     assert result.status_code == 200
     assert result.json()['summary']['excluded_piece_count'] == 3
@@ -244,7 +244,7 @@ def test_local_settings_without_password_and_cross_site_blocked():
 
 
 def test_stale_exclusion_consent_cannot_drop_newly_invalid_parts():
-    request = OptimizeRequest(items=[item('P100*100*4', 6184), item('H300*300*10*15', 11000), item('D19', 2000)])
+    request = OptimizeRequest(items=[item('P100*100*4', 6184), item('H300*300*10*15', 11000), item('D19', 2000)], enable_splice_planning=False)
     approved = confirmed(request, settings())
     changed = {**DEFAULT_STOCK_LENGTHS, 'H빔': [8000]}
     with pytest.raises(PlanningIssues) as caught:
