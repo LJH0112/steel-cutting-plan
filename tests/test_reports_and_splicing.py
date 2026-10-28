@@ -55,7 +55,8 @@ def test_exact_columns_subtotals_and_merged_excel_patterns():
     wb = load_workbook(io.BytesIO(export_xlsx(p)))
     assert [c.value for c in wb['원자재 리스트'][4]] == [label for _, label in MATERIAL_COLUMNS]
     assert [c.value for c in wb['조합 리스트'][4]] == [label for _, label in COMBINATION_COLUMNS]
-    assert any(str(r) == 'A6:A7' for r in wb['조합 리스트'].merged_cells.ranges)
+    assert any(str(r) == 'A6:A8' for r in wb['조합 리스트'].merged_cells.ranges)
+    assert any(str(r) == 'G6:G7' for r in wb['조합 리스트'].merged_cells.ranges)
     assert sum(r[8] or 0 for r in wb['조합 리스트'].iter_rows(min_row=5, values_only=True) if r[0] != '합 계') == 6
     assert wb['원자재 리스트']['E5'].value is None
 
@@ -152,8 +153,10 @@ def test_opt_in_splice_6184_uses_6000_base_and_189_connector():
     assert p['summary']['bar_count'] == 3
     assert p['summary']['total_splice_allowance'] == 10
     assert p['excluded'] == []
-    notes = ' '.join(c['remarks'] for g in p['report']['combination_groups'] for pat in g['patterns'] for c in pat['cuts'])
-    assert '본재 6000' in notes and '연결재 189' in notes and 'J-01' in notes
+    rows = [r for g in p['report']['combination_groups'] for pat in g['patterns'] for r in pat['rows']]
+    assert {r['remarks'] for r in rows} == {'J-01'}
+    assert {r['length'] for r in rows} == {6000, 189}
+    assert {a['role'] for r in rows for a in r['allocations']} == {'본재', '연결재'}
     check_splice_quantities(p)
     assert export_pdf(p).startswith(b'%PDF-')
 

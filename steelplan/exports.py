@@ -4,11 +4,15 @@ from pathlib import Path
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.worksheet.page import PageMargins
 from openpyxl.utils import get_column_letter
+from reportlab.lib.pagesizes import A3, A4, landscape
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
-from .reports import MATERIAL_COLUMNS, COMBINATION_COLUMNS, build_report, combination_rows
+from .reports import (MATERIAL_COLUMNS, COMBINATION_COLUMNS, MATERIAL_WIDTHS, COMBINATION_WIDTHS,
+                      REPORT_ROW_HEIGHT, REPORT_HEADER_HEIGHT, REPORT_FONT_SIZE, REPORT_PAGE_MARGIN,
+                      build_report, combination_rows)
 
 ROOT = Path(__file__).resolve().parent.parent
 FONT = 'NanumGothic'
@@ -27,9 +31,32 @@ def paper(value):
     return value
 
 
+def excel_widths(ratios, paper_size, orientation):
+    # Excel's default Calibri 11 column unit is seven pixels plus five pixels
+    # padding. Preserve the same relative widths as the browser and PDF.
+    size = A3 if paper_size == 'A3' else A4
+    if orientation == 'landscape':
+        size = landscape(size)
+    # Match the PDF's printable width so fit-to-page does not shrink the fixed
+    # row heights and font. Leave one point for rounding and the outer rules.
+    pixels = (size[0] - 2 * REPORT_PAGE_MARGIN - 1) * 4 / 3
+    return [round((pixels * v / sum(ratios) - 5) / 7, 3) for v in ratios]
+
+
+def report_cell(cell, *, horizontal=None):
+    cell.font = Font(name='맑은 고딕', size=REPORT_FONT_SIZE)
+    cell.alignment = Alignment(horizontal=horizontal or ('right' if isinstance(cell.value, (float, int)) else 'left'),
+                               vertical='center', wrap_text=False, shrink_to_fit=True)
+    if isinstance(cell.value, (float, int)):
+        cell.number_format = '#,##0.###'
+
+
 def styled_sheet(wb, title, headers, rows, widths, paper_size='A4', orientation='portrait', report_title=None, metadata=None):
     ws = wb.create_sheet(title)
     if report_title:
+        ws.page_margins = PageMargins(left=REPORT_PAGE_MARGIN/72, right=REPORT_PAGE_MARGIN/72,
+                                      top=REPORT_PAGE_MARGIN/72, bottom=REPORT_PAGE_MARGIN/72,
+                                      header=0, footer=14/72)
         meta = metadata or {}
         ws.append([report_title]); ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
         ws.append(['[공 사 명] ' + meta.get('project_name', '')]); ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(headers)-2)
@@ -75,6 +102,13 @@ def styled_sheet(wb, title, headers, rows, widths, paper_size='A4', orientation=
         ws.row_dimensions[1].height=38
         ws.row_dimensions[2].height=22
         ws.row_dimensions[3].height=22
+        ws.row_dimensions[header_row].height = REPORT_HEADER_HEIGHT
+        for row in ws.iter_rows(min_row=header_row + 1):
+            ws.row_dimensions[row[0].row].height = REPORT_ROW_HEIGHT
+            for cell in row:
+                report_cell(cell)
+        for cell in ws[header_row]:
+            cell.font = Font(name='맑은 고딕', size=REPORT_FONT_SIZE)
     if not report_title: ws.row_dimensions[1].height = 26
     for i, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = width
@@ -97,7 +131,8 @@ def notes_text(plan):
     return (f"단위 mm, kg. 원자재의 조합길이·중량·잔철·사용율은 규격 소계에 표시; 소계·합계의 길이는 총 발주 길이. "
             f"사용율=제작 절편 길이/발주 길이×100. 총 로스율은 잔철+날 손실 기준. "
             f"원자재 중량은 단위중량 미제공으로 공란. 조합중량 해석: {basis}; 누락·오류가 있으면 소계도 공란. "
-            f"조합 리스트의 조합길이·잔철·등분은 1본 기준; 총수량=등분×원자재 수량. 비고 수량은 총수량 기준.")
+            f"조합길이·잔철은 1본 기준. 길이·등분은 같은 길이의 부재 행에 공통 적용; "
+            f"같은 길이의 총수량 합계=등분×원자재 수량. 비고는 부재 번호만, 수량은 총수량 열에 표시.")
 
 
 def export_xlsx(plan, paper_size='A4', orientation='portrait'):
@@ -107,14 +142,14 @@ def export_xlsx(plan, paper_size='A4', orientation='portrait'):
     meta = plan.get('report_metadata', {})
     ws = styled_sheet(wb, '원자재 리스트', [label for _, label in MATERIAL_COLUMNS],
                       [[row[key] for key, _ in MATERIAL_COLUMNS] for row in report['material_display_rows']],
-                      [12, 26, 15, 10, 18, 18, 18, 14, 12, 18], paper_size, orientation, '원자재 물량 집계표', meta)
+                      excel_widths(MATERIAL_WIDTHS, paper_size, orientation), paper_size, orientation, '원자재 물량 집계표', meta)
     for index, row in enumerate(report['material_display_rows'], 5):
         if row['kind'] != 'detail':
             for cell in ws[index]:
-                cell.font = Font(name='맑은 고딕', bold=True, size=10)
+                cell.font = Font(name='맑은 고딕', bold=True, size=REPORT_FONT_SIZE)
                 cell.fill = PatternFill('solid', fgColor='FFFF00')
                 cell.border = Border(top=Side(style='thin'), bottom=Side(style='thin'), left=Side(style='thin'), right=Side(style='thin'))
-            ws.cell(index, 2).alignment = Alignment(horizontal='center')
+            report_cell(ws.cell(index, 2), horizontal='center')
     ws.append([summary_text(plan, report)])
     ws.merge_cells(start_row=ws.max_row, start_column=1, end_row=ws.max_row, end_column=10)
     ws.row_dimensions[ws.max_row].height = 32
@@ -124,33 +159,40 @@ def export_xlsx(plan, paper_size='A4', orientation='portrait'):
     ws.row_dimensions[ws.max_row].height = 45
     ws.cell(ws.max_row, 1).alignment = Alignment(wrap_text=True)
     combo = styled_sheet(wb, '조합 리스트', [label for _, label in COMBINATION_COLUMNS], [],
-                         [9, 13, 9, 15, 12, 12, 13, 9, 12, 17, 32], paper_size, orientation, '조합 리스트', meta)
+                         excel_widths(COMBINATION_WIDTHS, paper_size, orientation), paper_size, orientation, '조합 리스트', meta)
     for group in report['combination_groups']:
         combo.append([f"[재질] {group['material']}   [규격] {group['spec']}   [단위중량]"])
         group_row = combo.max_row
         combo.merge_cells(start_row=group_row, start_column=1, end_row=group_row, end_column=11)
         combo.cell(group_row, 1).fill = PatternFill('solid', fgColor='FFFFFF')
         combo.cell(group_row, 1).font = Font(name='맑은 고딕', bold=True)
+        combo.row_dimensions[group_row].height = REPORT_ROW_HEIGHT
+        report_cell(combo.cell(group_row, 1))
         for pattern in group['patterns']:
             start = combo.max_row + 1
-            for row in combination_rows(pattern, max_note_chars=200):
+            printed = list(combination_rows(pattern))
+            for row in printed:
                 combo.append([safe_cell(row[key]) for key, _ in COMBINATION_COLUMNS])
             end = combo.max_row
             for col in range(1, 7):
                 if end > start:
                     combo.merge_cells(start_row=start, start_column=col, end_row=end, end_column=col)
+            for offset, row in enumerate(printed):
+                if row['length_rowspan'] > 1:
+                    for col in (7, 8):
+                        combo.merge_cells(start_row=start+offset, start_column=col,
+                                          end_row=start+offset+row['length_rowspan']-1, end_column=col)
             for row in combo.iter_rows(min_row=start, max_row=end):
                 for cell in row:
-                    cell.alignment = Alignment(vertical='center', wrap_text=True)
-                    cell.font = Font(name='맑은 고딕', size=10)
+                    report_cell(cell)
                     cell.border = Border(left=Side(style='thin'),right=Side(style='thin'))
-                    if isinstance(cell.value, (float, int)): cell.number_format = '#,##0.###'
-                text_length=len(str(row[-1].value or ''))
-                combo.row_dimensions[row[0].row].height=max(22, min(140, 14*((text_length+24)//25)))
+                combo.row_dimensions[row[0].row].height = REPORT_ROW_HEIGHT
             for cell in combo[end]:
                 cell.border=Border(left=Side(style='thin'),right=Side(style='thin'),bottom=Side(style='thin'))
         combo.append([safe_cell(group['total'][key]) for key,_ in COMBINATION_COLUMNS])
+        combo.row_dimensions[combo.max_row].height = REPORT_ROW_HEIGHT
         for cell in combo[combo.max_row]:
+            report_cell(cell)
             cell.fill=PatternFill('solid',fgColor='FFFF00')
             cell.border=Border(top=Side(style='thin'),bottom=Side(style='thin'),left=Side(style='thin'),right=Side(style='thin'))
     combo.auto_filter.ref = f'A4:K{combo.max_row}'

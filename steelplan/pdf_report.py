@@ -6,18 +6,55 @@ from xml.sax.saxutils import escape
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A3, A4, landscape
 from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_RIGHT
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
-from reportlab.platypus import BaseDocTemplate, Frame, PageTemplate, NextPageTemplate, PageBreak, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import BaseDocTemplate, Frame, PageTemplate, NextPageTemplate, PageBreak, Paragraph, Spacer, Table, TableStyle, Flowable
 
-from .reports import MATERIAL_COLUMNS, COMBINATION_COLUMNS, combination_rows
+from .reports import (MATERIAL_COLUMNS, COMBINATION_COLUMNS, MATERIAL_WIDTHS, COMBINATION_WIDTHS,
+                      REPORT_ROW_HEIGHT, REPORT_HEADER_HEIGHT, REPORT_FONT_SIZE, REPORT_PAGE_MARGIN, combination_rows)
 
 FONT = 'NanumGothic'
 if FONT not in pdfmetrics.getRegisteredFontNames():
     pdfmetrics.registerFont(TTFont(FONT, str(Path(__file__).resolve().parent.parent/'assets/fonts/NanumGothic-Regular.ttf')))
 YELLOW = colors.HexColor('#ffff00')
+
+
+class FixedCell(Flowable):
+    """Fit complete text into a fixed cell, without changing any row or column.
+
+    Text uses at most two lines; unusually long identifiers are compressed
+    horizontally rather than clipped or omitted. PDF text remains searchable.
+    """
+    def __init__(self, value, height, alignment='left'):
+        super().__init__()
+        self.text = '' if value is None else str(value)
+        self.height = height
+        self.alignment = alignment
+
+    def wrap(self, avail_width, avail_height):
+        self.width = avail_width
+        return self.width, self.height
+
+    def draw(self):
+        text, font, leading = self.text, REPORT_FONT_SIZE, 10
+        measure = lambda value: pdfmetrics.stringWidth(value, FONT, font)
+        lines = [text]
+        if self.alignment == 'left' and measure(text) > self.width and len(text) > 1:
+            middle = min(range(1, len(text)), key=lambda i: max(measure(text[:i]), measure(text[i:])))
+            lines = [text[:middle], text[middle:]]
+        baseline = (self.height - len(lines)*leading)/2 + (leading-font)/2 + leading*(len(lines)-1) + 2
+        for line in lines:
+            full_width = measure(line)
+            scale = min(1, self.width / full_width) if full_width else 1
+            width = full_width * scale
+            x = self.width-width if self.alignment=='right' else (self.width-width)/2 if self.alignment=='center' else 0
+            obj = self.canv.beginText(x, baseline)
+            obj.setFont(FONT, font)
+            obj.setHorizScale(scale*100)
+            obj.textOut(line)
+            self.canv.drawText(obj)
+            baseline -= leading
 
 
 def render_pdf(plan, report, summary, notes, paper_size, orientation, section):
@@ -26,14 +63,12 @@ def render_pdf(plan, report, summary, notes, paper_size, orientation, section):
     size = A3 if paper_size == 'A3' else A4
     if orientation == 'landscape': size = landscape(size)
     width, height = size
-    margin, footer_y = 28, 30
+    margin, footer_y = REPORT_PAGE_MARGIN, 30
     content_width = width - 2*margin
     meta = plan.get('report_metadata', {})
     body = ParagraphStyle('reference-body', fontName=FONT, fontSize=8 if paper_size=='A4' else 10,
                           leading=11 if paper_size=='A4' else 14, wordWrap='CJK')
     heading = ParagraphStyle('reference-heading', parent=body, fontSize=11, leading=16, spaceBefore=8, spaceAfter=8)
-    centered = ParagraphStyle('reference-centered', parent=body, alignment=TA_CENTER)
-    numeric = ParagraphStyle('reference-number', parent=body, alignment=TA_RIGHT)
     def p(value, style=body):
         return Paragraph(escape('' if value is None else str(value)).replace('\n','<br/>'), style)
     def number(value, comma=False):
@@ -71,13 +106,17 @@ def render_pdf(plan, report, summary, notes, paper_size, orientation, section):
                 draw_fitted(self,'[파 일 명]  '+meta.get('source_filename',''),margin,footer_y-1,content_width)
                 self.restoreState();super().showPage()
             super().save()
-    def table(headers, rows, ratios, *, comma=False, spans=(), totals=(), ends=()):
-        data=[[p(label,centered) for label in headers]]+[[p(number(value,comma),numeric if isinstance(value,(float,int)) else centered if value in ('소 계','합 계') else body) for value in row]for row in rows]
+    def table(headers, rows, ratios, *, comma=True, spans=(), totals=(), ends=()):
+        data = [[FixedCell(label, REPORT_HEADER_HEIGHT-4, 'center') for label in headers]]
+        data += [[FixedCell(number(value,comma), REPORT_ROW_HEIGHT-4,
+                            'right' if isinstance(value,(float,int)) else 'center' if value in ('소 계','합 계') else 'left')
+                  for value in row] for row in rows]
         t=Table(data,colWidths=[content_width*v/sum(ratios)for v in ratios],repeatRows=1,
-                hAlign='LEFT',splitByRow=1,splitInRow=1)
-        commands=[('BACKGROUND',(0,0),(-1,0),YELLOW),('VALIGN',(0,0),(-1,-1),'TOP'),
+                rowHeights=[REPORT_HEADER_HEIGHT]+[REPORT_ROW_HEIGHT]*len(rows),
+                hAlign='LEFT',splitByRow=1)
+        commands=[('BACKGROUND',(0,0),(-1,0),YELLOW),('VALIGN',(0,0),(-1,-1),'MIDDLE'),
                   ('LEFTPADDING',(0,0),(-1,-1),4),('RIGHTPADDING',(0,0),(-1,-1),4),
-                  ('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5),
+                  ('TOPPADDING',(0,0),(-1,-1),2),('BOTTOMPADDING',(0,0),(-1,-1),2),
                   ('BOX',(0,0),(-1,-1),.7,colors.black),('LINEBELOW',(0,0),(-1,0),.7,colors.black)]
         for col in range(len(headers)-1):commands.append(('LINEAFTER',(col,0),(col,-1),.35,colors.black))
         for row in totals:
@@ -96,26 +135,30 @@ def render_pdf(plan, report, summary, notes, paper_size, orientation, section):
         start_page('materials','원자재 물량 집계표')
         rows=[[r[k]for k,_ in MATERIAL_COLUMNS]for r in report['material_display_rows']]
         total_rows=[i for i,r in enumerate(report['material_display_rows'],1)if r['kind']!='detail']
-        story += [table([label for _,label in MATERIAL_COLUMNS],rows,[41,84,60,35,62,58,65,47,36,54],comma=True,totals=total_rows),Spacer(1,8),p(summary)]
+        story += [table([label for _,label in MATERIAL_COLUMNS],rows,MATERIAL_WIDTHS,comma=True,totals=total_rows),Spacer(1,8),p(summary)]
     if section in ('all','combinations'):
         for gi,group in enumerate(report['combination_groups']):
             start_page(f'combination-{gi}','조합 리스트',group)
             rows=[];spans=[];ends=[]
             for pattern in group['patterns']:
-                printed=list(combination_rows(pattern,max_note_chars=400))
+                printed=list(combination_rows(pattern))
                 start=len(rows)+1
-                note_width=content_width*112/sum([41,47,37,52,37,39,38,34,36,65,112])-8
-                measured=sum(max(body.leading+10,p(r['remarks']).wrap(note_width,10**6)[1]+10) for r in printed)
-                merge=len(printed)<=8 and measured<height-112-(footer_y+23)-45
+                merge=len(printed)<=8
                 for index,row in enumerate(printed):
+                    cut_merge = 1 < row['length_rowspan'] <= 8
                     rows.append([row[key] if index==0 or col>=6 or (col==0 and not merge) else None
                                  for col,(key,_)in enumerate(COMBINATION_COLUMNS)])
+                    if cut_merge:
+                        for col in (6, 7):
+                            spans.append(('SPAN',(col,len(rows)),(col,len(rows)+row['length_rowspan']-1)))
+                    if not row['length_start']:
+                        rows[-1][6:8] = [None, None]
                 end=len(rows)
                 if merge and end>start:
                     spans.extend(('SPAN',(col,start),(col,end))for col in range(6))
                 ends.append(end)
             rows.append([group['total'][k]for k,_ in COMBINATION_COLUMNS])
-            story.append(table([label for _,label in COMBINATION_COLUMNS],rows,[41,47,37,52,37,39,38,34,36,65,112],spans=spans,ends=ends,totals=[len(rows)]))
+            story.append(table([label for _,label in COMBINATION_COLUMNS],rows,COMBINATION_WIDTHS,spans=spans,ends=ends,totals=[len(rows)]))
     # Approval and validation details use their own section, keeping the reference forms uncluttered.
     if plan.get('splices') or report['excluded'] or section=='all':
         start_page('validation','수량 검증 · 이음 승인 대상')

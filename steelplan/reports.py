@@ -15,6 +15,21 @@ COMBINATION_COLUMNS = [
     ('remnant', '잔철'), ('utilization', '사용율'), ('length', '길이'),
     ('split_count', '등분'), ('total_quantity', '총수량'), ('total_weight', '총중량,KG'), ('remarks', '비고'),
 ]
+# One fixed layout shared by HTML colgroups, Excel and PDF. Widths are relative;
+# text never changes them. Heights and font sizes are in print points.
+MATERIAL_WIDTHS = [41, 84, 60, 35, 62, 58, 65, 47, 36, 54]
+COMBINATION_WIDTHS = [41, 47, 37, 52, 37, 39, 38, 34, 36, 65, 112]
+REPORT_ROW_HEIGHT = 24
+REPORT_HEADER_HEIGHT = 28
+REPORT_FONT_SIZE = 9
+REPORT_SCREEN_WIDTH = 1080
+REPORT_PAGE_MARGIN = 28
+
+
+def report_layout(widths):
+    return {'widths': widths, 'row_height': REPORT_ROW_HEIGHT,
+            'header_height': REPORT_HEADER_HEIGHT, 'font_size': REPORT_FONT_SIZE,
+            'screen_width': REPORT_SCREEN_WIDTH}
 
 
 def rounded(value, digits=3):
@@ -55,7 +70,7 @@ def build_report(plan):
             pool[(item['material'], item['spec'], units(item['length']))].append({
                 'index': index, 'row': item.get('source_row') or index + 1,
                 'input_index': item.get('input_index') if item.get('input_index') is not None else index,
-                'title': item.get('title') or f"원본 {item.get('source_row') or index + 1}행",
+                'title': item.get('title', ''),
                 'remaining': item['quantity'], 'weight': known_weight(item, basis),
                 'role': item.get('role', ''), 'assembly_length': item.get('assembly_length'),
             })
@@ -75,7 +90,7 @@ def build_report(plan):
         pattern_weights = []
         for cut in pattern['cuts']:
             count = cut['quantity'] * pattern['bar_count']
-            remaining, assigned, cut_weights = count, [], []
+            remaining, assigned, cut_weights, members = count, [], [], {}
             queue = pool[(key[0], key[1], units(cut['length']))]
             while remaining:
                 if not queue:
@@ -88,6 +103,11 @@ def build_report(plan):
                 mass = None if row['weight'] is None else row['weight'] * take
                 pattern_weights.append(mass)
                 cut_weights.append(mass)
+                member = members.setdefault(row['title'], {'remarks': row['title'],
+                    'total_quantity': 0, '_weights': [], 'allocations': []})
+                member['total_quantity'] += take
+                member['_weights'].append(mass)
+                member['allocations'].append(assigned[-1])
                 allocations_by_source[row['index']] += take
                 allocated_quantity[row['input_index']] += take
                 allocated_length[row['input_index']] += units(cut['length']) * take
@@ -95,12 +115,13 @@ def build_report(plan):
                 row['remaining'] -= take
                 if row['remaining'] == 0:
                     queue.popleft()
-            remarks = '; '.join(f"{a['title']} × {a['quantity']}" +
-                (f" [{a['role']} {cut['length']:g}mm, 완성 {a['assembly_length']:g}mm]" if a['role'] else '') for a in assigned)
+            for member in members.values():
+                member['total_weight'] = rounded(complete_sum(member.pop('_weights')))
             p['cuts'].append({'length': cut['length'], 'split_count': cut['quantity'],
                               'total_quantity': count, 'total_weight': rounded(complete_sum(cut_weights)),
-                              'remarks': remarks, 'allocations': assigned})
+                              'members': list(members.values()), 'allocations': assigned})
             produced += count
+        p['rows'] = list(combination_rows(p))
         weights[(key[0], key[1], pattern['stock_length'])].append(complete_sum(pattern_weights))
         group_weights[key].append(complete_sum(pattern_weights))
         group['patterns'].append(p)
@@ -109,6 +130,19 @@ def build_report(plan):
     expected = sum(i['quantity'] for i in source if i.get('included', True))
     if expected != produced:
         raise ValueError('출력 부재 수량이 BOM과 일치하지 않습니다.')
+    # Verify the actual member rows used by all three renderers, in addition to
+    # the original optimizer's cut counts. Duplicate titles retain source IDs.
+    displayed_quantity = Counter()
+    for group in groups.values():
+        for pattern in group['patterns']:
+            for row in pattern['rows']:
+                if (sum(a['quantity'] for a in row['allocations']) != row['total_quantity']
+                        or any(a['title'] != row['remarks'] for a in row['allocations'])):
+                    raise ValueError('부재 번호별 출력 수량 검증 실패')
+                for allocation in row['allocations']:
+                    displayed_quantity[allocation['input_index']] += allocation['quantity']
+    if displayed_quantity != allocated_quantity:
+        raise ValueError('부재 번호별 출력 수량이 BOM 배정 수량과 일치하지 않습니다.')
 
     rows = []
     by_spec = defaultdict(list)
@@ -178,19 +212,27 @@ def build_report(plan):
     excluded = [{**e, 'display_reason': exclusion_reason(e)} for e in plan.get('excluded', [])]
     return {'material_columns': [{'key': k, 'label': label} for k, label in MATERIAL_COLUMNS],
             'combination_columns': [{'key': k, 'label': label} for k, label in COMBINATION_COLUMNS],
+            'material_layout': report_layout(MATERIAL_WIDTHS),
+            'combination_layout': report_layout(COMBINATION_WIDTHS),
             'material_rows': rows, 'material_display_rows': display_rows,
             'combination_groups': list(groups.values()), 'excluded': excluded, 'reconciliation': reconciliation,
             'weight_basis': basis, 'output_piece_count': produced, 'quantity_verified': True,
+            'member_quantity_verified': True,
             'allocations_by_source': dict(allocations_by_source)}
 
 
-def combination_rows(pattern, max_note_chars=30000):
-    """Keep Excel cells below its text limit without losing BOM references."""
+def combination_rows(pattern):
+    """One member number per row; the length and per-bar count share a group.
+
+    A member's allocated total need not be divisible by the pattern's bar count.
+    Keep the original split_count once for the whole length group, rather than
+    rounding a per-member split count or altering the physical cutting pattern.
+    """
+    if 'rows' in pattern:
+        yield from pattern['rows']
+        return
+    common = {key: pattern[key] for key, _ in COMBINATION_COLUMNS[:6]}
     for cut in pattern['cuts']:
-        notes = cut['remarks']
-        chunks = [notes[i:i + max_note_chars] for i in range(0, len(notes), max_note_chars)] or ['']
-        for index, chunk in enumerate(chunks):
-            yield {**pattern, 'length': cut['length'] if not index else None,
-                   'split_count': cut['split_count'] if not index else None,
-                   'total_quantity': cut['total_quantity'] if not index else None,
-                   'total_weight': cut['total_weight'] if not index else None, 'remarks': chunk}
+        for index, member in enumerate(cut['members']):
+            yield {**common, **member, 'length': cut['length'], 'split_count': cut['split_count'],
+                   'length_start': index == 0, 'length_rowspan': len(cut['members']) if index == 0 else 0}

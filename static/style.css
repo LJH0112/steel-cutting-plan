@@ -7,3 +7,13 @@
 
 /* Matched to the supplied CP forms: yellow header/subtotals and black rules. */
 .project-fields{display:grid;grid-template-columns:2fr 1.4fr 1fr;gap:12px;margin:8px 0 14px}.project-fields label{font-size:11px;color:#45604d}.project-fields input{margin-top:4px}.reference-heading{padding:18px 12px 10px;color:#000;background:#fff}.reference-heading h2{text-align:center;font-size:24px;font-weight:400;margin:0 0 18px;letter-spacing:3px}.reference-heading>div{display:flex;justify-content:space-between;gap:12px;font-size:12px;margin-top:3px}.reference-heading span{overflow-wrap:anywhere}.report-table th{background:#ffff00!important;color:#000;border-color:#000;font-weight:400;text-align:center}.report-table td{color:#000;border-left:.5px solid #000;border-right:.5px solid #000;border-top:0;border-bottom:0}.report-table{border:1px solid #000;font-family:Nanum,'Malgun Gothic',sans-serif}.report-table .subtotal td,.report-table .grand_total td,.report-table tfoot td{background:#ffff00!important;border-top:.6px solid #000;border-bottom:.6px solid #000;font-weight:400}.pattern-rows,.pattern-rows:nth-of-type(even){background:#fff;border-bottom:.6px solid #000}.combo-group h3{background:#fff;color:#000;font-weight:400;border:0;font-size:13px;letter-spacing:.3px}.quantity-details{margin-top:12px;font-size:11px}.quantity-details>summary{padding:10px 0;cursor:pointer}.export-buttons select{width:auto;max-width:150px;height:33px;font-size:11px}.reference-heading+ .table-scroll{margin-top:0}@media(max-width:600px){.project-fields{grid-template-columns:1fr}.reference-heading>div{flex-direction:column;gap:2px}.reference-heading h2{font-size:21px}.export-buttons{display:flex;flex-wrap:wrap}}
+
+/* Fixed report geometry comes from reports.py and never depends on cell text. */
+.fixed-report{table-layout:fixed;width:100%;--report-row-height:32px;--report-header-height:37.333px;--report-font-size:12px}
+.fixed-report th{height:var(--report-header-height);padding:2px 4px;white-space:normal;line-height:14px;font-size:var(--report-font-size);overflow:hidden;vertical-align:middle}
+.fixed-report tr{height:var(--report-row-height)}
+.fixed-report td,.fixed-report td.remarks{padding:2px 4px;height:var(--report-row-height);font-size:var(--report-font-size);line-height:14px;min-width:0;max-width:none;white-space:nowrap;overflow:hidden;vertical-align:middle}
+.fixed-report .cell-text{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:20px;max-width:100%}
+.fixed-report .remarks{text-align:left}
+.fixed-report .numeric{text-align:right}
+.fixed-report .centered{text-align:center}

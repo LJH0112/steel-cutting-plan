@@ -218,9 +218,11 @@ function renderResult() {
   $('orders-count').textContent = result.orders.length;
   $('patterns-count').textContent = result.patterns.length;
   $('physical-count').textContent = `제작 절편 ${fmt(report.output_piece_count)}개`;
+  applyReportLayout($('orders-table'), report.material_layout);
   $('orders-head').innerHTML = '<tr>' + report.material_columns.map(c => `<th>${esc(c.label)}</th>`).join('') + '</tr>';
-  $('orders-body').innerHTML = report.material_display_rows.map(row => `<tr class="${row.kind}">${report.material_columns.map((c, i) => `<td class="${i > 1 ? 'numeric' : ''}">${reportCell(row[c.key])}</td>`).join('')}</tr>`).join('');
+  $('orders-body').innerHTML = report.material_display_rows.map(row => `<tr class="${row.kind}">${report.material_columns.map(c => fixedCellHTML(row[c.key], c.key)).join('')}</tr>`).join('');
   $('patterns-list').innerHTML = report.combination_groups.map(group => combinationGroupHTML(group, report.combination_columns)).join('');
+  document.querySelectorAll('.combination-table').forEach(table => applyReportLayout(table, report.combination_layout));
   renderSplices(result);
   const meta = result.report_metadata || {};
   for (const [id,title] of [['materials-project-header','원자재 물량 집계표'], ['combinations-project-header','조합 리스트']]) {
@@ -238,16 +240,31 @@ function renderResult() {
 function reportCell(value) {
   return value === null || value === undefined ? '' : typeof value === 'number' ? fmt(value) : esc(value);
 }
+function fixedCellHTML(value, key, attributes = '') {
+  const alignment = key === 'remarks' ? 'remarks' : typeof value === 'number' ? 'numeric' : ['소 계', '합 계'].includes(value) ? 'centered' : '';
+  return `<td class="${alignment}" ${attributes}><span class="cell-text" title="${esc(value ?? '')}">${reportCell(value)}</span></td>`;
+}
+function applyReportLayout(table, layout) {
+  table.style.setProperty('--report-row-height', `${layout.row_height * 4 / 3}px`);
+  table.style.setProperty('--report-header-height', `${layout.header_height * 4 / 3}px`);
+  table.style.setProperty('--report-font-size', `${layout.font_size * 4 / 3}px`);
+  table.style.minWidth = `${layout.screen_width}px`;
+  const total = layout.widths.reduce((sum, width) => sum + width, 0);
+  const html = `<colgroup>${layout.widths.map(width => `<col style="width:${100 * width / total}%">`).join('')}</colgroup>`;
+  table.querySelector('colgroup')?.remove();
+  table.insertAdjacentHTML('afterbegin', html);
+}
 function combinationGroupHTML(group, columns) {
   const heading = `[재질] ${esc(group.material)}　 [규격] ${esc(group.spec)}　 [단위중량]`;
   const bodies = group.patterns.map(pattern => {
-    const rows = pattern.cuts.map((cut, index) => {
-      const common = index ? '' : columns.slice(0, 6).map(c => `<td rowspan="${pattern.cuts.length}" class="numeric">${reportCell(pattern[c.key])}</td>`).join('');
-      return `<tr>${common}<td class="numeric">${fmt(cut.length)}</td><td class="numeric">${fmt(cut.split_count)}</td><td class="numeric output-quantity" data-quantity="${cut.total_quantity}">${fmt(cut.total_quantity)}</td><td class="numeric">${reportCell(cut.total_weight)}</td><td class="remarks">${esc(cut.remarks)}</td></tr>`;
+    const rows = pattern.rows.map((row, index) => {
+      const common = index ? '' : columns.slice(0, 6).map(c => fixedCellHTML(pattern[c.key], c.key, `rowspan="${pattern.rows.length}"`)).join('');
+      const length = row.length_start ? ['length', 'split_count'].map(key => fixedCellHTML(row[key], key, `rowspan="${row.length_rowspan}"`)).join('') : '';
+      return `<tr>${common}${length}<td class="numeric output-quantity" data-quantity="${row.total_quantity}"><span class="cell-text">${fmt(row.total_quantity)}</span></td>${fixedCellHTML(row.total_weight, 'total_weight')}${fixedCellHTML(row.remarks, 'remarks')}</tr>`;
     }).join('');
     return `<tbody class="pattern-rows" data-pattern="${esc(pattern.id)}">${rows}</tbody>`;
   }).join('');
-  return `<section class="combo-group"><h3>${heading}</h3><div class="table-scroll"><table class="report-table combination-table"><thead><tr>${columns.map(c => `<th>${esc(c.label)}</th>`).join('')}</tr></thead>${bodies}<tfoot><tr class="grand_total">${columns.map(c => `<td>${reportCell(group.total[c.key])}</td>`).join('')}</tr></tfoot></table></div></section>`;
+  return `<section class="combo-group"><h3>${heading}</h3><div class="table-scroll"><table class="report-table fixed-report combination-table"><thead><tr>${columns.map(c => `<th>${esc(c.label)}</th>`).join('')}</tr></thead>${bodies}<tfoot><tr class="grand_total">${columns.map(c => fixedCellHTML(group.total[c.key], c.key)).join('')}</tr></tfoot></table></div></section>`;
 }
 function renderSplices(result) {
   const assemblies = result.splices || [];
