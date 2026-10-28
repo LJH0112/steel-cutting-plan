@@ -92,8 +92,8 @@ def ts_sample():
 
 async def upload_bytes(file):
     try:
-        if not file.filename or not file.filename.lower().endswith('.xlsx'):
-            raise HTTPException(400, '.xlsx 형식만 지원합니다. .xls 파일은 .xlsx로 저장해 주세요.')
+        if not file.filename or not file.filename.lower().endswith(('.xls', '.xlsx')):
+            raise HTTPException(400, '.xls 또는 .xlsx 파일을 업로드해 주세요.')
         data = await file.read(MAX_UPLOAD + 1)
         if len(data) > MAX_UPLOAD:
             raise HTTPException(413, '업로드 파일은 10MB 이하만 가능합니다.')
@@ -109,7 +109,7 @@ async def import_operation(function, *args):
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:
         logging.exception('BOM import failed')
-        raise HTTPException(400, '엑셀 파일을 읽지 못했습니다. 암호화·손상 여부와 .xlsx 형식을 확인해 주세요.') from exc
+        raise HTTPException(400, '엑셀 파일을 읽지 못했습니다. 암호화·손상 여부와 .xls/.xlsx 형식을 확인해 주세요.') from exc
 
 
 @app.post('/api/inspect')
@@ -133,13 +133,16 @@ async def preview(file: UploadFile = File(...), sheet: str = Form(...), header_r
     except ValueError:
         raise HTTPException(400, '열 매핑 형식이 올바르지 않습니다.')
     data = await import_operation(parse_bom, await upload_bytes(file), sheet, header_row, mapped)
-    if not data['errors']:
+    if not data['errors'] and data['items']:
         try:
             request = OptimizeRequest(items=data['items'], kerf=kerf, splice_allowance=splice_allowance,
-                                      reusable_remnant_min=reusable_remnant_min, enable_splice_planning=enable_splice_planning)
+                                      reusable_remnant_min=reusable_remnant_min, enable_splice_planning=enable_splice_planning,
+                                      import_audit=data.get('import_audit'))
             data.update(validate_plan_input(request, current_settings()))
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+    elif not data['errors']:
+        data.update(issues=[], eligible_rows=0, eligible_pieces=0, excluded_pieces=0)
     return data
 
 

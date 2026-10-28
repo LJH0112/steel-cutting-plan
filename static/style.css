@@ -17,3 +17,4 @@
 .fixed-report .remarks{text-align:left}
 .fixed-report .numeric{text-align:right}
 .fixed-report .centered{text-align:center}
+.import-exclusions{margin:12px 0;border:1px solid #ccd8cf;background:#fff;padding:10px 12px;font-size:11px}.import-exclusions>summary{cursor:pointer;font-weight:600}.import-exclusions table td:last-child{white-space:normal;min-width:240px}.import-exclusions .table-scroll{max-height:320px;overflow:auto}

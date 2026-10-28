@@ -8,7 +8,9 @@ DEFAULT_STOCK_LENGTHS = {
     '앵글': [10000],
     'C형강': [10000],
     '환봉': [6000, 8000],
+    'T바': [],  # No assumed stock length: an administrator must supply it.
 }
+TS_BOM_MATERIAL_TYPES = frozenset(('H빔', '잔넬', 'C형강', '환봉', 'T바'))
 NUMBER = r'\d+(?:\.\d+)?'
 DIM = rf'[xX×*]{NUMBER}'
 SECTION_PATTERNS = (
@@ -20,6 +22,7 @@ SECTION_PATTERNS = (
     ('C형강', rf'C-?{NUMBER}(?:{DIM}){{3}}'),
     ('환봉', rf'D{NUMBER}'),
     ('환봉', rf'ROD{NUMBER}'),
+    ('T바', rf'T-?{NUMBER}(?:{DIM}){{2,3}}'),
 )
 
 

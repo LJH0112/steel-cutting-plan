@@ -1,10 +1,11 @@
-"""Strict, bounded XLSX import with automatic Korean / English column matching."""
+"""Bounded XLS/XLSX import; TS BOM LIST has a strict, isolated import path."""
 import io
 import re
 import zipfile
 from decimal import Decimal, InvalidOperation
 
 from openpyxl import load_workbook
+import xlrd
 from pydantic import ValidationError
 
 from .models import BOMItem, millimeters
@@ -31,12 +32,49 @@ def workbook(data):
     if len(data) > MAX_UPLOAD:
         raise ValueError('엑셀 파일은 10MB 이하만 업로드할 수 있습니다.')
     try:
+        if data.startswith(b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'):
+            return XlsWorkbook(xlrd.open_workbook(file_contents=data, on_demand=True))
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             if sum(i.file_size for i in archive.infolist()) > 50 * 1024 * 1024:
                 raise ValueError('압축 해제 크기가 너무 큰 엑셀 파일입니다.')
         return load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-    except (zipfile.BadZipFile, KeyError, OSError) as exc:
-        raise ValueError('올바른 .xlsx 파일을 업로드해 주세요.') from exc
+    except (zipfile.BadZipFile, KeyError, OSError, xlrd.XLRDError) as exc:
+        raise ValueError('올바른 .xls 또는 .xlsx 파일을 업로드해 주세요.') from exc
+
+
+class XlsWorksheet:
+    def __init__(self, sheet):
+        self.sheet = sheet
+        self.title = sheet.name
+        self.max_row = sheet.nrows
+
+    def iter_rows(self, min_row=1, max_row=None, max_col=100, values_only=True):
+        for row in range(min_row - 1, min(max_row or self.max_row, self.max_row)):
+            cells = self.sheet.row(row)
+            yield tuple(None if col >= len(cells) or cells[col].ctype in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK)
+                        else bool(cells[col].value) if cells[col].ctype == xlrd.XL_CELL_BOOLEAN
+                        else xlrd.error_text_from_code.get(cells[col].value, '#ERROR!') if cells[col].ctype == xlrd.XL_CELL_ERROR
+                        else cells[col].value for col in range(max_col))
+
+
+class XlsWorkbook:
+    def __init__(self, book):
+        self.book = book
+        self.sheetnames = book.sheet_names()
+
+    def __getitem__(self, name):
+        return XlsWorksheet(self.book.sheet_by_name(name))
+
+    def close(self):
+        self.book.release_resources()
+
+
+def strict_ts_bom(wb):
+    if 'TS BOM LIST' in wb.sheetnames:
+        return True
+    if isinstance(wb, XlsWorkbook):
+        raise ValueError('.xls 파일에는 TS BOM LIST 시트가 반드시 있어야 합니다. 다른 시트로 대체하지 않습니다.')
+    return False
 
 
 def find_mapping(headers):
@@ -51,6 +89,9 @@ def find_mapping(headers):
 def inspect_bom(data):
     wb = workbook(data)
     try:
+        if strict_ts_bom(wb):
+            from .ts_bom import inspect_ts_bom
+            return inspect_ts_bom(wb)
         sheets = []
         for ws in wb.worksheets[:30]:
             best = (0, 1, [], {})
@@ -75,6 +116,9 @@ def read_headers(data, sheet, header_row):
         raise ValueError('헤더 행은 1~100 사이로 설정해 주세요.')
     wb = workbook(data)
     try:
+        if strict_ts_bom(wb):
+            from .ts_bom import locked_headers
+            return locked_headers(wb, sheet, header_row)
         if sheet not in wb.sheetnames:
             raise ValueError('선택한 시트가 없습니다.')
         headers = next(wb[sheet].iter_rows(min_row=header_row, max_row=header_row, max_col=100, values_only=True))
@@ -93,6 +137,9 @@ def parse_bom(data, sheet, header_row, mapping):
         raise ValueError('헤더 행은 1~100 사이로 설정해 주세요.')
     wb = workbook(data)
     try:
+        if strict_ts_bom(wb):
+            from .ts_bom import parse_ts_bom
+            return parse_ts_bom(wb, data, sheet, header_row, mapping)
         if sheet not in wb.sheetnames:
             raise ValueError('선택한 시트가 없습니다.')
         ws = wb[sheet]

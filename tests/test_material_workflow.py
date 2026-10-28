@@ -63,7 +63,7 @@ def test_explicit_material_classification(spec, kind):
 
 def test_exact_default_lengths():
     assert DEFAULT_STOCK_LENGTHS == {'H빔': list(range(8000, 16001, 1000)), '각파이프': [6000],
-                                      '잔넬': [10000], '앵글': [10000], 'C형강': [10000], '환봉': [6000, 8000]}
+                                      '잔넬': [10000], '앵글': [10000], 'C형강': [10000], '환봉': [6000, 8000], 'T바': []}
 
 
 def test_actual_bom_mapping_whitespace_metadata_and_total():
@@ -143,7 +143,7 @@ def test_type_allowed_lengths_and_material_spec_isolation():
     assert actual == expected
     assert plan['summary']['group_count'] == 8
     assert plan['excluded'] == []
-    assert {o['material_type'] for o in plan['orders']} == set(DEFAULT_STOCK_LENGTHS)
+    assert {o['material_type'] for o in plan['orders']} == set(DEFAULT_STOCK_LENGTHS) - {'T바'}
     assert all(o['stock_length'] == 6000 for o in plan['orders'] if o['material_type'] == '각파이프')
 
 

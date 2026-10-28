@@ -2,7 +2,7 @@
 import hashlib
 import json
 
-from .materials import classify_material
+from .materials import classify_material, TS_BOM_MATERIAL_TYPES
 from .optimizer import MIN_REMAINDER, optimize, units
 from .reports import build_report
 from .splicing import needs_splice, optimize_with_splices
@@ -23,6 +23,10 @@ def assess_items(items, kerf, settings, enable_splice_planning=False):
         code = reason = None
         if kind is None:
             code, reason = 'UNSUPPORTED_MATERIAL', '미지원 자재: DESCRIPTION 규격 형식을 확인해 주세요.'
+        elif item.source_format == 'ts_bom' and kind not in TS_BOM_MATERIAL_TYPES:
+            code, reason = 'OUTSIDE_PROFILE_SCOPE', 'TS BOM LIST 대상 외 자재: H빔·잔넬·C형강·환봉·T바만 최적화'
+        elif not allowed:
+            code, reason = 'STOCK_LENGTH_UNCONFIGURED', f'{kind} 발주 길이 미설정: 관리자 설정에서 승인된 길이를 입력해 주세요.'
         elif enable_splice_planning and needs_splice(item):
             pass  # Deliberately retained for whole-stock base + connector fabrication.
         elif item.length > max(allowed):
@@ -40,6 +44,8 @@ def assess_items(items, kerf, settings, enable_splice_planning=False):
 
 
 def validate_plan_input(request, settings):
+    if request.import_audit and any(i.source_format != 'ts_bom' or i.source_sheet != 'TS BOM LIST' for i in request.items):
+        raise ValueError('TS BOM LIST 가져오기 결과에는 해당 시트의 대상 부재만 사용할 수 있습니다.')
     if request.stock_lengths is not None:
         raise ValueError('전역 발주 길이는 사용할 수 없습니다. 관리자 설정의 자재 종류별 길이를 사용해 주세요.')
     if sum(item.quantity for item in request.items) > 5000:
@@ -49,7 +55,8 @@ def validate_plan_input(request, settings):
                 'settings': settings.model_dump(mode='json'), 'kerf': str(request.kerf.normalize()),
                 'splice_allowance': str(request.splice_allowance.normalize()),
                 'reusable_remnant_min': str(request.reusable_remnant_min.normalize()),
-                'enable_splice_planning': request.enable_splice_planning}
+                'enable_splice_planning': request.enable_splice_planning,
+                'import_audit': request.import_audit.model_dump(mode='json') if request.import_audit else None}
     token = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
     return {'issues': issues, 'exclusion_token': token, 'eligible_rows': len(eligible),
             'splice_candidates': [{**i.model_dump(mode='json'), 'status': '검토 필요', 'base_length': 6000}
@@ -74,6 +81,8 @@ def plan_by_material(request, settings):
     else:
         plan = optimize(request.model_copy(update={'items': eligible}), settings.stock_lengths_by_type)
     plan['excluded'] = issues
+    if request.import_audit:
+        plan['import_audit'] = request.import_audit.model_dump(mode='json')
     plan['bom'] = [item.model_dump(mode='json') for item in request.items]
     for index, item in enumerate(plan['bom']):
         item['input_index'] = index

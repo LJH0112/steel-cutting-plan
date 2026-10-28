@@ -1,6 +1,6 @@
 'use strict';
 const $ = id => document.getElementById(id);
-const state = {file: null, sheets: [], items: [], issues: [], result: null, working: false, validationVersion: 0};
+const state = {file: null, sheets: [], items: [], issues: [], result: null, working: false, validationVersion: 0, importAudit: null};
 const fields = {material: '재질', spec: '규격', length: '길이 (mm)', quantity: '수량'};
 const fmt = value => Number(value).toLocaleString('ko-KR', {maximumFractionDigits: 3});
 const esc = value => String(value).replace(/[&<>"']/g, char => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[char]));
@@ -45,6 +45,8 @@ function clearResults() {
 function clearBOM() {
   state.validationVersion++;
   state.items = [];
+  state.importAudit = null;
+  $('import-preview').hidden = true;
   state.validationPending = false;
   state.eligibleRows = 0;
   state.exclusionToken = null;
@@ -73,13 +75,14 @@ function sheetForm() {
   form.append('enable_splice_planning', String($('enable-splice').checked));
   return form;
 }
-function renderMapping(headers, mapping) {
+function renderMapping(headers, mapping, locked = false) {
   $('mapping').replaceChildren();
   for (const [field, label] of Object.entries(fields)) {
     const wrapper = document.createElement('label');
     wrapper.textContent = label;
     const select = document.createElement('select');
     select.id = `map-${field}`;
+    select.disabled = locked;
     const empty = new Option('열을 선택하세요', '');
     select.add(empty);
     headers.forEach((header, index) => {
@@ -105,6 +108,8 @@ async function loadPreview() {
   if (data.errors.length) throw new Error('BOM의 다음 오류를 수정한 후 다시 업로드해 주세요. 일부 행만 계산하지 않습니다.\n' +
     data.errors.map(item => `${item.row}행 / ${item.title || '번호 없음'} / ${item.spec} / ${item.length}mm: ${item.message}`).join('\n'));
   state.items = data.items;
+  state.importAudit = data.import_audit || null;
+  renderImportExclusions('import-preview', 'import-preview-body', 'import-preview-summary', state.importAudit);
   const count = data.items.reduce((sum, item) => sum + item.quantity, 0);
   $('bom-count').textContent = `${fmt(data.items.length)}행 · ${fmt(count)}개`;
   $('bom-body').innerHTML = data.items.slice(0, 100).map((item, index) => `<tr><td>${item.source_row || index + 1}</td><td>${esc(item.title)}</td><td>${esc(item.material)}</td><td>${esc(item.spec)}</td><td class="numeric">${fmt(item.length)}</td><td class="numeric">${fmt(item.quantity)}</td></tr>`).join('');
@@ -120,7 +125,7 @@ async function loadFile(file) {
   $('mapping-panel').hidden = true;
   $('file-title').textContent = '엑셀 BOM 파일을 올려주세요';
   $('file-description').textContent = '파일을 여기로 끌어오거나 아래 버튼으로 선택하세요';
-  if (!file.name.toLowerCase().endsWith('.xlsx')) return error('.xlsx 파일을 선택해 주세요.');
+  if (!/\.xlsx?$/i.test(file.name)) return error('.xls 또는 .xlsx 파일을 선택해 주세요.');
   if (file.size > 10 * 1024 * 1024) return error('엑셀 파일은 10MB 이하만 업로드할 수 있습니다.');
   state.file = file;
   busy(true, 'BOM을 읽고 있습니다', '시트와 재질·규격·길이·수량 열을 확인하고 있습니다.');
@@ -131,7 +136,10 @@ async function loadFile(file) {
     $('sheet').value = data.suggested_sheet;
     const sheet = data.sheets.find(s => s.name === data.suggested_sheet);
     $('header-row').value = sheet.header_row;
-    renderMapping(sheet.headers, sheet.mapping);
+    renderMapping(sheet.headers, sheet.mapping, sheet.locked);
+    $('sheet').disabled = Boolean(sheet.locked);
+    $('header-row').readOnly = Boolean(sheet.locked);
+    $('headers').disabled = Boolean(sheet.locked);
     $('mapping-panel').hidden = false;
     $('file-title').textContent = file.name;
     $('file-description').textContent = `${fmt(file.size / 1024)} KB · 시트와 열을 확인해 주세요`;
@@ -159,7 +167,7 @@ $('sheet').addEventListener('change', async () => {
   clearError(); clearBOM();
   const sheet = state.sheets.find(s => s.name === $('sheet').value);
   $('header-row').value = sheet.header_row;
-  renderMapping(sheet.headers, sheet.mapping);
+    renderMapping(sheet.headers, sheet.mapping, sheet.locked);
 });
 $('header-row').addEventListener('input', clearBOM);
 $('headers').addEventListener('click', async () => {
@@ -167,7 +175,7 @@ $('headers').addEventListener('click', async () => {
   clearError(); clearBOM(); busy(true, '열을 다시 읽고 있습니다');
   try {
     const data = await api('/api/headers', {method: 'POST', body: sheetForm()});
-    renderMapping(data.headers, data.mapping);
+    renderMapping(data.headers, data.mapping, data.locked);
   } catch (e) { error(e.message); }
   finally { busy(false); }
 });
@@ -194,7 +202,7 @@ $('optimize').addEventListener('click', async () => {
       body: JSON.stringify({items: state.items, kerf, time_limit: Number($('time-limit').value), exclude_invalid: $('exclude-invalid').checked, exclusion_token: state.exclusionToken,
         splice_allowance: $('splice-allowance').value, reusable_remnant_min: $('reuse-min').value,
         splice_details_approved: $('splice-approved').checked, enable_splice_planning: $('enable-splice').checked,
-        weight_basis: $('weight-basis').value, project_name: $('project-name').value, project_section: $('project-section').value, source_filename: state.file?.name || '', ...($('report-date').value ? {report_date: $('report-date').value} : {})})});
+        import_audit: state.importAudit, weight_basis: $('weight-basis').value, project_name: $('project-name').value, project_section: $('project-section').value, source_filename: state.file?.name || '', ...($('report-date').value ? {report_date: $('report-date').value} : {})})});
     renderResult();
     $('results-section').scrollIntoView({behavior: 'smooth', block: 'start'});
   } catch (e) { if (e.data?.issues) applyValidation(e.data); error(e.message); }
@@ -229,11 +237,14 @@ function renderResult() {
     $(id).innerHTML = `<h2>${title}</h2><div><span>[공 사 명] ${esc(meta.project_name || '')}</span><span>[날 짜] ${esc(meta.report_date || '')}</span></div><div><span>[공사구분] ${esc(meta.project_section || '')}</span><span>[파일명] ${esc(meta.source_filename || '')}</span></div>`;
   }
   $('quantity-body').innerHTML = report.reconciliation.map(r => `<tr><td>${r.row}</td><td>${esc(r.title)}</td><td>${esc(r.spec)}</td><td>${r.required_quantity}</td><td>${r.planned_quantity}</td><td>${r.excluded_quantity}</td><td>${r.component_quantity}</td><td>${esc(r.status)}</td></tr>`).join('');
+  $('part-mark-details').hidden = !report.part_mark_reconciliation?.length;
+  $('part-mark-body').innerHTML = (report.part_mark_reconciliation || []).map(r => `<tr><td>${esc(r.title)}</td><td>${esc(r.material)}</td><td>${esc(r.spec)}</td><td class="numeric">${r.required_quantity}</td><td class="numeric">${r.planned_quantity}</td><td class="numeric">${r.excluded_quantity}</td><td>${esc(r.status)}</td></tr>`).join('');
 
-  $('result-settings').textContent = `${Object.entries(result.settings.stock_lengths_by_type).map(([k,v]) => `${k}: ${v.map(fmt).join(', ')}mm`).join(' / ')} · 날 손실 ${fmt(result.settings.kerf)}mm/개 · 잔재 > 30mm · 총 제품 ${fmt(s.total_parts_length)}mm · 총 날 손실 ${fmt(s.total_kerf_loss)}mm`;
+  $('result-settings').textContent = `${Object.entries(result.settings.stock_lengths_by_type).map(([k,v]) => `${k}: ${v.length ? v.map(fmt).join(', ') + 'mm' : '미설정'}`).join(' / ')} · 날 손실 ${fmt(result.settings.kerf)}mm/개 · 잔재 > 30mm · 총 제품 ${fmt(s.total_parts_length)}mm · 총 날 손실 ${fmt(s.total_kerf_loss)}mm`;
   $('solver-status').innerHTML = result.statuses.map(r => `<li>${esc(r.material)} / ${esc(r.spec)} — ${esc(r.detail)}</li>`).join('');
   $('excluded-summary').textContent = result.excluded.length ? `${result.excluded.length}행 · ${fmt(s.excluded_piece_count)}개 제외 / 입력 ${fmt(s.input_piece_count)}개 = 생산 ${fmt(s.piece_count)}개 + 제외 ${fmt(s.excluded_piece_count)}개. 사용자가 제외를 선택한 부재입니다.` : '계산 제외 부재 없음 · 모든 입력 부재를 계산했습니다.';
   $('excluded-body').innerHTML = issueRows(result.excluded);
+  renderImportExclusions('import-results', 'import-results-body', 'import-results-summary', result.import_audit);
   if (s.total_splice_allowance) $('result-settings').textContent += ` · 이음 여유 합계 ${fmt(s.total_splice_allowance)}mm · 이음 여유 포함 순 로스율 ${fmt(s.net_loss_rate)}%`;
   selectTab('orders');
 }
@@ -303,6 +314,15 @@ document.querySelectorAll('[data-format]').forEach(button => button.addEventList
 function issueRows(issues) {
   return issues.map(e => `<tr><td>${e.row}</td><td>${esc(e.title || '—')}</td><td>${esc(e.material_type)}</td><td>${esc(e.spec)}</td><td class="numeric">${fmt(e.length)}</td><td>${fmt(e.quantity)}</td><td>${e.allowed_lengths.map(fmt).join(', ') || '—'}</td><td>${esc(e.code === 'STOCK_LENGTH_EXCEEDED' ? '발주 길이 초과' : e.reason)}</td></tr>`).join('');
 }
+function renderImportExclusions(sectionId, bodyId, summaryId, audit) {
+  $(sectionId).hidden = !audit;
+  if (!audit) { $(bodyId).replaceChildren(); return; }
+  const entries = audit.exclusions || [], counts = {};
+  entries.forEach(e => counts[e.code] = (counts[e.code] || 0) + 1);
+  $(summaryId).textContent = `TS BOM LIST만 사용 · 헤더 ${audit.header_row}행 · ` +
+    `다른 시트 ${counts.SHEET_NOT_SELECTED || 0}개 / 대상 외 자재 ${counts.OUTSIDE_PROFILE_SCOPE || 0}행 / 조립 요약 ${counts.ASSEMBLY_SUMMARY || 0}행 / 소계·합계 ${counts.SUBTOTAL || 0}행. 조립 요약 수량은 상세 부재 수량에 다시 더하지 않습니다.`;
+  $(bodyId).innerHTML = entries.map(e => `<tr><td>${esc(e.sheet)}</td><td>${e.row ?? ''}</td><td>${esc(e.assembly_mark)}</td><td>${esc(e.title)}</td><td>${esc(e.material)}</td><td>${esc(e.spec)}</td><td>${esc(e.length)}</td><td>${esc(e.quantity)}</td><td>${esc(e.reason)}</td></tr>`).join('');
+}
 function applyValidation(data) {
   state.validationPending = false;
   state.exclusionToken = data.exclusion_token;
@@ -330,7 +350,7 @@ async function revalidate() {
   $('exclude-invalid').checked = false;
   updateCalculateButton();
   try {
-    const data = await api('/api/validate', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({items: state.items, kerf: $('kerf').value, splice_allowance: $('splice-allowance').value, reusable_remnant_min: $('reuse-min').value, enable_splice_planning: $('enable-splice').checked})});
+    const data = await api('/api/validate', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({items: state.items, import_audit: state.importAudit, kerf: $('kerf').value, splice_allowance: $('splice-allowance').value, reusable_remnant_min: $('reuse-min').value, enable_splice_planning: $('enable-splice').checked})});
     if (version !== state.validationVersion) return;
     state.validationPending = false;
     applyValidation(data);
@@ -340,12 +360,13 @@ async function revalidate() {
 }
 function renderSettings(settings) {
   const entries = Object.entries(settings.stock_lengths_by_type);
-  $('stock-summary').innerHTML = entries.map(([kind, lengths]) => `<div><strong>${esc(kind)}</strong><span>${lengths.map(fmt).join(' / ')} mm</span></div>`).join('');
+  $('stock-summary').innerHTML = entries.map(([kind, lengths]) => `<div><strong>${esc(kind)}</strong><span>${lengths.length ? lengths.map(fmt).join(' / ') + ' mm' : '미설정 · 관리자 입력 필요'}</span></div>`).join('');
   $('stock-editors').replaceChildren();
   for (const [kind, lengths] of entries) {
     const label = document.createElement('label'); label.className = 'field-label'; label.textContent = kind;
     const input = document.createElement('input'); input.dataset.materialType = kind;
     input.value = lengths.join(', ');
+    if (kind === 'T바') input.placeholder = '승인된 발주 길이 입력 (기본값 없음)';
     if (kind === '각파이프') { input.readOnly = true; input.title = '6000mm 고정 · 초과 부재는 이음 제작 검토'; } input.setAttribute('aria-label', `${kind} 발주 길이`);
     label.append(input); $('stock-editors').append(label);
   }

@@ -160,7 +160,7 @@ def render_pdf(plan, report, summary, notes, paper_size, orientation, section):
             rows.append([group['total'][k]for k,_ in COMBINATION_COLUMNS])
             story.append(table([label for _,label in COMBINATION_COLUMNS],rows,COMBINATION_WIDTHS,spans=spans,ends=ends,totals=[len(rows)]))
     # Approval and validation details use their own section, keeping the reference forms uncluttered.
-    if plan.get('splices') or report['excluded'] or section=='all':
+    if plan.get('splices') or report['excluded'] or report.get('import_exclusions') or section=='all':
         start_page('validation','수량 검증 · 이음 승인 대상')
         story += [p(summary,heading),p(notes),Spacer(1,8)]
         if plan.get('splices'):
@@ -177,6 +177,24 @@ def render_pdf(plan, report, summary, notes, paper_size, orientation, section):
             [[r[k]for k in ('row','title','required_quantity','planned_quantity','excluded_quantity','component_quantity','status')]for r in report['reconciliation']],
             [30,110,50,50,40,55,100])]
         story += [Spacer(1,8),p('실제 절단 후 잔재 >30mm. 무절단 이음 통재는 날 손실과 잔철 0mm. 원본 각 행의 제작 수량과 길이를 모두 대조했으며, 원자재 총중량은 단위중량 정보가 없으면 공란입니다.')]
+        if plan.get('import_audit'):
+            start_page('part-mark-check', 'Part Mark 수량 검증')
+            story += [p('필요 수량 = 계획 총수량 + 계산 예외 수량. 예외를 자동 제작·누락하지 않으며 사유는 계산 제외 부재에 표시합니다.'),Spacer(1,8),
+                table(['Part Mark','Grade','PROFILE','필요 수량','계획 총수량','계산 예외','판정'],
+                    [[r[k]for k in ('title','material','spec','required_quantity','planned_quantity','excluded_quantity','status')]
+                     for r in report['part_mark_reconciliation']], [75,50,115,45,45,45,90])]
+            start_page('source-trace', '원본 Part Mark · Ass Mark 추적')
+            story += [p('비고는 Part Mark 원문만 표시합니다. Ass Mark를 접두사로 붙이지 않으며 조립 요약행 수량을 곱하지 않습니다.'), Spacer(1,8),
+                table(['행','Ass Mark','Part Mark','Grade','PROFILE','길이','원본 수량','계산 여부'],
+                    [[i.get('source_row'),i.get('assembly_mark',''),i.get('title',''),i['material'],i['spec'],float(i['length']),i['quantity'],
+                      '포함' if i.get('included',True) else '계산 예외'] for i in plan['bom']],
+                    [30,55,65,50,105,55,40,55])]
+        if report.get('import_exclusions'):
+            start_page('import-exclusions', '가져오기 제외 내역')
+            story += [p('TS BOM LIST만 최적화 대상으로 읽었습니다. 아래 다른 시트의 셀 내용은 읽지 않았으며, 조립 요약행·소계/합계·대상 외 PROFILE은 절단 부재로 중복 집계하지 않습니다.'),Spacer(1,8),
+                table(['시트','행','Ass Mark','Part Mark','PROFILE','길이','수량','제외 사유'],
+                    [[e[k]for k in ('sheet','row','assembly_mark','title','spec','length','quantity','reason')]
+                     for e in report['import_exclusions']], [65,30,40,45,90,40,35,120])]
     doc.addPageTemplates(templates)
     doc.build(story,canvasmaker=NumberedCanvas)
     return output.getvalue()

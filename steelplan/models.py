@@ -1,9 +1,9 @@
 from decimal import Decimal, InvalidOperation
 from datetime import date, datetime, timedelta, timezone
 import re
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationInfo, field_validator
 
 from .materials import DEFAULT_STOCK_LENGTHS, compact
 
@@ -22,6 +22,7 @@ def millimeters(value) -> Decimal:
 
 class BOMItem(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
+    source_format: Literal['legacy', 'ts_bom'] = 'legacy'
     material: str = Field(min_length=1, max_length=100)
     spec: str = Field(min_length=1, max_length=150)
     length: Decimal = Field(gt=0, le=100000)
@@ -32,10 +33,16 @@ class BOMItem(BaseModel):
     weight: str = Field(default='', max_length=100)
     paint_area: str = Field(default='', max_length=100)
     input_index: int | None = Field(default=None, ge=0, le=999)
+    source_sheet: str = Field(default='', max_length=100)
+    assembly_mark: str = Field(default='', max_length=150)
+    source_cells: dict[Literal['material', 'spec', 'title', 'assembly_mark', 'length', 'quantity'],
+                       Annotated[str, StringConstraints(max_length=500, strip_whitespace=False)]] = Field(default_factory=dict)
 
     @field_validator('material', 'spec', mode='before')
     @classmethod
-    def remove_spaces(cls, value):
+    def remove_spaces(cls, value, info: ValidationInfo):
+        if info.data.get('source_format') == 'ts_bom' and isinstance(value, str):
+            return value.strip()  # Keep the spelling and internal spacing of source identifiers.
         return compact(value) if isinstance(value, str) else value
 
     @field_validator('material', 'spec', 'title', 'item_class', 'weight', 'paint_area')
@@ -49,6 +56,27 @@ class BOMItem(BaseModel):
     @classmethod
     def validate_length(cls, value):
         return millimeters(value)
+
+
+class ImportExclusion(BaseModel):
+    sheet: str = Field(max_length=100)
+    row: int | None = Field(default=None, ge=1, le=10101)
+    assembly_mark: str = Field(default='', max_length=150)
+    title: str = Field(default='', max_length=150)
+    material: str = Field(default='', max_length=100)
+    spec: str = Field(default='', max_length=150)
+    length: str = Field(default='', max_length=100)
+    quantity: str = Field(default='', max_length=100)
+    code: Literal['SHEET_NOT_SELECTED', 'OUTSIDE_PROFILE_SCOPE', 'ASSEMBLY_SUMMARY', 'SUBTOTAL', 'REPEATED_HEADER']
+    reason: str = Field(max_length=250)
+
+
+class ImportAudit(BaseModel):
+    sheet: Literal['TS BOM LIST'] = 'TS BOM LIST'
+    header_row: int = Field(ge=1, le=100)
+    columns: dict[str, str] = Field(max_length=10)
+    exclusions: list[ImportExclusion] = Field(default_factory=list, max_length=10100)
+    source_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
 
 
 class OptimizeRequest(BaseModel):
@@ -67,6 +95,7 @@ class OptimizeRequest(BaseModel):
     project_section: str = Field(default='', max_length=200)
     source_filename: str = Field(default='', max_length=250)
     report_date: date = Field(default_factory=lambda: datetime.now(timezone(timedelta(hours=9))).date())
+    import_audit: ImportAudit | None = None
 
     @field_validator('project_name', 'project_section', 'source_filename')
     @classmethod
@@ -100,12 +129,15 @@ class StockSettings(BaseModel):
     @field_validator('stock_lengths_by_type', mode='before')
     @classmethod
     def validate_lengths(cls, value):
+        # Read existing six-kind settings without changing any saved lengths.
+        if isinstance(value, dict) and set(value) == set(DEFAULT_STOCK_LENGTHS) - {'T바'}:
+            value = {**value, 'T바': []}
         if not isinstance(value, dict) or set(value) != set(DEFAULT_STOCK_LENGTHS):
-            raise ValueError('6개 자재 종류의 발주 길이를 모두 지정해 주세요.')
+            raise ValueError('7개 자재 종류의 발주 길이를 모두 지정해 주세요. T바는 미설정([])을 허용합니다.')
         result = {}
         for name, lengths in value.items():
-            if not isinstance(lengths, list) or not 1 <= len(lengths) <= 20:
-                raise ValueError(f'{name}: 발주 길이는 1~20개까지 지정할 수 있습니다.')
+            if not isinstance(lengths, list) or not (0 if name == 'T바' else 1) <= len(lengths) <= 20:
+                raise ValueError(f'{name}: 발주 길이는 1~20개까지 지정할 수 있습니다. T바만 미설정을 허용합니다.')
             parsed = sorted({millimeters(length) for length in lengths})
             if any(length <= 30 for length in parsed):
                 raise ValueError(f'{name}: 발주 길이는 30mm보다 커야 합니다.')

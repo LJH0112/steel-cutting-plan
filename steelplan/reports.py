@@ -73,6 +73,7 @@ def build_report(plan):
                 'title': item.get('title', ''),
                 'remaining': item['quantity'], 'weight': known_weight(item, basis),
                 'role': item.get('role', ''), 'assembly_length': item.get('assembly_length'),
+                'assembly_mark': item.get('assembly_mark', ''), 'sheet': item.get('source_sheet', ''),
             })
     groups, weights = {}, defaultdict(list)
     produced = 0
@@ -99,6 +100,7 @@ def build_report(plan):
                 take = min(remaining, row['remaining'])
                 assigned.append({'source_index': row['index'], 'row': row['row'], 'title': row['title'],
                                  'input_index': row['input_index'],
+                                 'assembly_mark': row['assembly_mark'], 'sheet': row['sheet'],
                                  'quantity': take, 'role': row['role'], 'assembly_length': row['assembly_length']})
                 mass = None if row['weight'] is None else row['weight'] * take
                 pattern_weights.append(mass)
@@ -206,10 +208,25 @@ def build_report(plan):
         if (allocated_quantity[index], allocated_length[index]) != ((expected_pieces, expected_length) if included else (0, 0)):
             raise ValueError(f"원본 {item.get('source_row') or index + 1}행의 제작 수량 또는 길이가 일치하지 않습니다.")
         reconciliation.append({'row': item.get('source_row') or index + 1, 'title': item.get('title', ''),
+            'assembly_mark': item.get('assembly_mark', ''), 'sheet': item.get('source_sheet', ''),
             'material': item['material'], 'spec': item['spec'], 'required_quantity': qty,
             'planned_quantity': qty if included else 0, 'excluded_quantity': 0 if included else qty,
             'component_quantity': allocated_quantity[index], 'status': '이음 승인 대상' if assembly else '계산 포함' if included else '사용자 동의 제외'})
     excluded = [{**e, 'display_reason': exclusion_reason(e)} for e in plan.get('excluded', [])]
+    part_marks = {}
+    for row in reconciliation:
+        if row['sheet'] != 'TS BOM LIST':
+            continue
+        key = row['material'], row['spec'], row['title']
+        member = part_marks.setdefault(key, {'material': key[0], 'spec': key[1], 'title': key[2],
+            'required_quantity': 0, 'planned_quantity': 0, 'excluded_quantity': 0, 'component_quantity': 0})
+        for field in ('required_quantity','planned_quantity','excluded_quantity','component_quantity'):
+            member[field] += row[field]
+    for member in part_marks.values():
+        if (member['required_quantity'] != member['planned_quantity'] + member['excluded_quantity']
+                or member['component_quantity'] != member['planned_quantity']):
+            raise ValueError(f"Part Mark {member['title']}의 수량 검증 실패")
+        member['status'] = '일치' if not member['excluded_quantity'] else '예외 포함 일치 · 제외 내역 확인'
     return {'material_columns': [{'key': k, 'label': label} for k, label in MATERIAL_COLUMNS],
             'combination_columns': [{'key': k, 'label': label} for k, label in COMBINATION_COLUMNS],
             'material_layout': report_layout(MATERIAL_WIDTHS),
@@ -218,6 +235,8 @@ def build_report(plan):
             'combination_groups': list(groups.values()), 'excluded': excluded, 'reconciliation': reconciliation,
             'weight_basis': basis, 'output_piece_count': produced, 'quantity_verified': True,
             'member_quantity_verified': True,
+            'import_exclusions': plan.get('import_audit', {}).get('exclusions', []),
+            'part_mark_reconciliation': list(part_marks.values()),
             'allocations_by_source': dict(allocations_by_source)}
 
 

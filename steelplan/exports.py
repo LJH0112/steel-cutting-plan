@@ -207,7 +207,7 @@ def export_xlsx(plan, paper_size='A4', orientation='portrait'):
                 ['절단날 손실 (mm/개)', cfg['kerf']], ['절단 후 잔재', '>30mm; 무절단 이음 통재는 절단 대상 아님'],
                 ['계산 상태', '최적해 증명' if plan['summary']['optimal'] else '실행 가능 계획 / 최적해 미확정'],
                 ['인쇄 용지', paper_size + (' 세로' if orientation=='portrait' else ' 가로')]]
-    settings.extend([kind + ' 발주 길이', ', '.join(f'{v:g}' for v in values)] for kind, values in cfg.get('stock_lengths_by_type', {}).items())
+    settings.extend([kind + ' 발주 길이', ', '.join(f'{v:g}' for v in values) if values else '미설정 · 관리자 입력 필요'] for kind, values in cfg.get('stock_lengths_by_type', {}).items())
     settings.extend([f"{r['material']} / {r['spec']}", r['detail']] for r in plan['statuses'])
     if plan.get('splices'):
         settings.extend([['이음 제작 여유 (mm/이음)', cfg['splice_allowance']],
@@ -231,6 +231,23 @@ def export_xlsx(plan, paper_size='A4', orientation='portrait'):
     styled_sheet(wb, '수량 검증', ['원본 행','부재 번호','재질','규격','BOM 수량','계획 완성 수량','제외 수량','제작 절편 수량','판정'],
         [[r[k] for k in ('row','title','material','spec','required_quantity','planned_quantity','excluded_quantity','component_quantity','status')]
          for r in report['reconciliation']], [12,24,18,32,16,18,16,18,22], paper_size, orientation)
+    if plan.get('import_audit'):
+        styled_sheet(wb, 'Part Mark 수량 검증', ['Part Mark','재질','PROFILE','필요 수량','계획 총수량','계산 예외 수량','판정'],
+            [[r[k] for k in ('title','material','spec','required_quantity','planned_quantity','excluded_quantity','status')]
+             for r in report['part_mark_reconciliation']], [24,18,32,18,18,18,32], paper_size, orientation)
+        styled_sheet(wb, '가져오기 제외', ['시트','원본 행','Ass Mark','Part Mark','재질','PROFILE','길이','수량','구분','제외 사유'],
+            [[e[k] for k in ('sheet','row','assembly_mark','title','material','spec','length','quantity','code','reason')]
+             for e in report['import_exclusions']], [22,12,18,22,18,32,16,12,32,65], paper_size, orientation)
+        styled_sheet(wb, '원본 셀 추적', ['시트','원본 행','Ass Mark (원본)','Part Mark (원본)','Grade (원본)','PROFILE (원본)','Length(mm) (원본)',"Q'ty (원본)",'계산 여부'],
+            [[i.get('source_sheet',''), i.get('source_row'),
+              *[i.get('source_cells',{}).get(k,'') for k in ('assembly_mark','title','material','spec','length','quantity')],
+              '포함' if i.get('included',True) else '계산 예외'] for i in plan['bom']],
+            [22,12,22,24,20,32,22,18,18], paper_size, orientation)
+        audit = plan['import_audit']
+        cfg_sheet = wb['계산 설정']
+        cfg_sheet.append(['가져오기 시트', audit['sheet']])
+        cfg_sheet.append(['원본 파일 SHA-256', audit['source_sha256']])
+        cfg_sheet.append(['원본 열', ', '.join(audit['columns'].values())])
     for sheet in wb:
         sheet.page_setup.orientation=orientation
     output = io.BytesIO(); wb.save(output)
