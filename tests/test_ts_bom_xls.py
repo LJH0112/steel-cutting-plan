@@ -18,7 +18,17 @@ from steelplan.bom import inspect_bom, parse_bom, read_headers
 from steelplan.exports import export_pdf, export_xlsx
 from steelplan.materials import DEFAULT_STOCK_LENGTHS, classify_material
 from steelplan.models import OptimizeRequest, StockSettings
+
 from steelplan.planning import PlanningIssues, plan_by_material, validate_plan_input
+
+
+def legacy_request(**kwargs):
+    """Preserve regression coverage for the explicitly requested compatibility mode."""
+    kwargs.setdefault("planning_mode", "legacy")
+    kwargs.setdefault("objective", "bar_count")
+    return OptimizeRequest(**kwargs)
+
+
 
 SAMPLE = Path(__file__).parent / 'fixtures/ts_bom_sample.xls'
 
@@ -36,7 +46,7 @@ def parsed_file(path=SAMPLE):
 
 
 def configured_plan(parsed):
-    request = OptimizeRequest(items=parsed['items'], import_audit=parsed['import_audit'], time_limit=2)
+    request = legacy_request(items=parsed['items'], import_audit=parsed['import_audit'], time_limit=2)
     # This is an explicit test setting, never an application default.
     config = StockSettings(stock_lengths_by_type={**DEFAULT_STOCK_LENGTHS, 'T바': [8000]})
     return plan_by_material(request, config)
@@ -100,7 +110,7 @@ def test_t_bar_has_no_assumed_length_and_old_settings_migrate_without_overwritin
     config = StockSettings(stock_lengths_by_type=old)
     assert config.stock_lengths_by_type['T바'] == [] and config.stock_lengths_by_type['H빔'] == [12000]
     parsed = parsed_file()
-    request = OptimizeRequest(items=parsed['items'], import_audit=parsed['import_audit'])
+    request = legacy_request(items=parsed['items'], import_audit=parsed['import_audit'])
     validation = validate_plan_input(request, config)
     assert [(e['title'],e['code'],e['allowed_lengths']) for e in validation['issues']] == [('T-01','STOCK_LENGTH_UNCONFIGURED',[])]
     with pytest.raises(PlanningIssues):
@@ -110,7 +120,7 @@ def test_t_bar_has_no_assumed_length_and_old_settings_migrate_without_overwritin
 
 
 def test_ts_bom_policy_cannot_reintroduce_square_pipe_into_the_plan():
-    request = OptimizeRequest(items=[dict(source_format='ts_bom', source_sheet='TS BOM LIST',
+    request = legacy_request(items=[dict(source_format='ts_bom', source_sheet='TS BOM LIST',
         material='SS275',spec='P100*100*4',title='P-01',length=6184,quantity=1)])
     v = validate_plan_input(request, StockSettings(stock_lengths_by_type=DEFAULT_STOCK_LENGTHS))
     assert v['issues'][0]['code'] == 'OUTSIDE_PROFILE_SCOPE'
@@ -122,7 +132,7 @@ def test_member_totals_exports_and_original_cells_match_after_xls_import(tmp_pat
     p = configured_plan(parsed)
     expected, actual = Counter(), Counter()
     for i in parsed['items']:
-        expected[i['material'],i['spec'],i['title']] += i['quantity']
+        expected[i['material'],i['spec'],'_'.join(v for v in (i['assembly_mark'],i['title']) if v)] += i['quantity']
     for g in p['report']['combination_groups']:
         for pattern in g['patterns']:
             for r in pattern['rows']:
@@ -203,13 +213,13 @@ def test_supplied_actual_bom_end_to_end():
     assert [s['name'] for s in info['sheets']]==['TS BOM LIST']
     s=info['sheets'][0]
     response=client.post('/api/preview',files={'file':('BOM.xls',data)},data={
-        'sheet':s['name'],'header_row':s['header_row'],'mapping':json.dumps(s['mapping'])})
+        'sheet':s['name'],'header_row':s['header_row'],'mapping':json.dumps(s['mapping']),'planning_mode':'legacy'})
     assert response.status_code==200
     parsed=response.json()
     assert len(parsed['items'])==141 and sum(i['quantity'] for i in parsed['items'])==292
     assert [(e['row'],e['quantity'],e['code']) for e in parsed['issues']]==[
         (459,10,'CUTTING_ALLOWANCE'),(464,5,'STOCK_LENGTH_EXCEEDED')]
-    request={'items':parsed['items'],'import_audit':parsed['import_audit'],'time_limit':2}
+    request={'planning_mode':'legacy','objective':'bar_count','items':parsed['items'],'import_audit':parsed['import_audit'],'time_limit':2}
     assert client.post('/api/optimize',json=request).status_code==409
     response=client.post('/api/optimize',json={**request,'exclude_invalid':True,'exclusion_token':parsed['exclusion_token']})
     assert response.status_code==200
@@ -229,7 +239,10 @@ def test_supplied_actual_bom_end_to_end():
         for pattern in g['patterns']:
             for row in pattern['rows']:
                 actual[g['material'],g['spec'],row['remarks']]+=row['total_quantity']
-    assert actual==Counter({(r['material'],r['spec'],r['title']):r['planned_quantity'] for r in p['report']['part_mark_reconciliation'] if r['planned_quantity']})
+    expected_display=Counter()
+    for r in p['report']['reconciliation']:
+        expected_display[r['material'],r['spec'],'_'.join(v for v in (r['assembly_mark'],r['title']) if v)]+=r['planned_quantity']
+    assert actual==+expected_display
     for fmt in ('xlsx','pdf'):
         output=client.get(f"/api/results/{p['job_id']}.{fmt}")
         assert output.status_code==200

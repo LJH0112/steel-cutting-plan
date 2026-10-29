@@ -11,7 +11,7 @@ from steelplan.optimizer import MIN_REMAINDER, optimize, solve_group, units
 def request(lengths, stocks=(6000,), kerf=0):
     return OptimizeRequest(items=[{'material': 'SS275', 'spec': 'H-300', 'length': length, 'quantity': count}
                                   for length, count in Counter(lengths).items()],
-                           stock_lengths=list(stocks), kerf=kerf, time_limit=3)
+                           stock_lengths=list(stocks), kerf=kerf, time_limit=3, objective="bar_count")
 
 
 def verify(plan, req):

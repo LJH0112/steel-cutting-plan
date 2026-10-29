@@ -118,6 +118,9 @@ def styled_sheet(wb, title, headers, rows, widths, paper_size='A4', orientation=
 def summary_text(plan, report):
     s = plan['summary']
     physical = report['output_piece_count']
+    if plan.get('manufacturing'):
+        return (f"확정 신규발주 {s['bar_count']}본 / {s['total_new_stock_length']:g}mm | 총 로스율 {s['loss_rate']}% | "
+            f"BOM {s['input_piece_count']}개 = 제작 확정 {s['piece_count']}개 + 미확정 {s['pending_piece_count']}개 | 제작 절편 {physical}개")
     text = (f"발주 {s['bar_count']}본 | 총 로스율 {s['loss_rate']}% | "
             f"BOM 완성 부재 {s.get('input_piece_count', s['piece_count'])}개 = "
             f"계산 {s['piece_count']}개 + 제외 {s.get('excluded_piece_count', 0)}개 | 제작 절편 {physical}개")
@@ -132,7 +135,10 @@ def notes_text(plan):
             f"사용율=제작 절편 길이/발주 길이×100. 총 로스율은 잔철+날 손실 기준. "
             f"원자재 중량은 단위중량 미제공으로 공란. 조합중량 해석: {basis}; 누락·오류가 있으면 소계도 공란. "
             f"조합길이·잔철은 1본 기준. 길이·등분은 같은 길이의 부재 행에 공통 적용; "
-            f"같은 길이의 총수량 합계=등분×원자재 수량. 비고는 부재 번호만, 수량은 총수량 열에 표시.")
+            f"같은 길이의 총수량 합계=등분×원자재 수량. 비고는 Ass Mark_Part Mark, 수량은 총수량 열에 표시. "
+            + ('원자재 리스트는 확정 신규발주만 집계. 조합에는 확인 재고도 포함하며 재고 ID는 별도 추적. '
+               '총 로스율=(신규+재고 투입길이-확정 완성길이)/(신규+재고 투입길이)×100; 날 손실·이음 여유·사용 후 잔재 포함. '
+               '비교안별 확정/미확정 수량을 함께 확인. 승인 예외 외 실제 절단 잔재 >30mm.' if plan.get('manufacturing') else ''))
 
 
 def export_xlsx(plan, paper_size='A4', orientation='portrait'):
@@ -161,7 +167,9 @@ def export_xlsx(plan, paper_size='A4', orientation='portrait'):
     combo = styled_sheet(wb, '조합 리스트', [label for _, label in COMBINATION_COLUMNS], [],
                          excel_widths(COMBINATION_WIDTHS, paper_size, orientation), paper_size, orientation, '조합 리스트', meta)
     for group in report['combination_groups']:
-        combo.append([f"[재질] {group['material']}   [규격] {group['spec']}   [단위중량]"])
+        sources=' / '.join(f"{p['number']}={p['inventory_id']}" for p in group['patterns'] if p.get('inventory_id'))
+        approved=', '.join(str(p['number']) for p in group['patterns'] if p.get('approval_id'))
+        combo.append([f"[재질] {group['material']}   [규격] {group['spec']}   [단위중량]"+('   [재고 패턴] '+sources if sources else '')+('   [승인 패턴] '+approved if approved else '')])
         group_row = combo.max_row
         combo.merge_cells(start_row=group_row, start_column=1, end_row=group_row, end_column=11)
         combo.cell(group_row, 1).fill = PatternFill('solid', fgColor='FFFFFF')
@@ -200,7 +208,7 @@ def export_xlsx(plan, paper_size='A4', orientation='portrait'):
                             '부재 분류 (ITEM)', 'WEIGHT.KG', 'PAINT.M', '계산 여부'],
                  [[i['material'], i['spec'], float(i['length']), i['quantity'], i.get('material_type', ''),
                    i.get('source_row'), i.get('title', ''), i.get('item_class', ''), i.get('weight', ''),
-                   i.get('paint_area', ''), '포함' if i.get('included', True) else '제외'] for i in plan['bom']],
+                   i.get('paint_area', ''), ('부분 확정·미확정' if i.get('confirmed_quantity') else '미확정') if i.get('pending_quantity') else '포함' if i.get('included', True) else '제외'] for i in plan['bom']],
                  [18, 32, 18, 12, 18, 12, 24, 24, 18, 18, 15], paper_size)
     cfg = plan['settings']
     settings = [['요약', summary_text(plan, report)], ['설명', notes_text(plan)],
@@ -228,26 +236,45 @@ def export_xlsx(plan, paper_size='A4', orientation='portrait'):
         styled_sheet(wb, '잔재 재사용', ['원본 행', '부재 번호', '재질', '규격', '연결재 길이', '수량', '원자재 패턴', '사용 전 잔재', '사용 후 잔재'],
                      [[a.get(k) for k in ('row', 'title', 'material', 'spec', 'length', 'quantity', 'pattern_id', 'before', 'after')]
                       for a in plan['remnant_reuse']], [12, 22, 18, 32, 20, 12, 20, 20, 20], paper_size)
-    styled_sheet(wb, '수량 검증', ['원본 행','부재 번호','재질','규격','BOM 수량','계획 완성 수량','제외 수량','제작 절편 수량','판정'],
-        [[r[k] for k in ('row','title','material','spec','required_quantity','planned_quantity','excluded_quantity','component_quantity','status')]
-         for r in report['reconciliation']], [12,24,18,32,16,18,16,18,22], paper_size, orientation)
+    styled_sheet(wb, '수량 검증', ['원본 행','부재 번호','재질','규격','BOM 수량','계획 완성 수량','제외 수량','제작 절편 수량','판정','미확정 수량'],
+        [[r[k] for k in ('row','title','material','spec','required_quantity','planned_quantity','excluded_quantity','component_quantity','status','pending_quantity')]
+         for r in report['reconciliation']], [12,24,18,32,16,18,16,18,22,18], paper_size, orientation)
     if plan.get('import_audit'):
-        styled_sheet(wb, 'Part Mark 수량 검증', ['Part Mark','재질','PROFILE','필요 수량','계획 총수량','계산 예외 수량','판정'],
-            [[r[k] for k in ('title','material','spec','required_quantity','planned_quantity','excluded_quantity','status')]
-             for r in report['part_mark_reconciliation']], [24,18,32,18,18,18,32], paper_size, orientation)
+        styled_sheet(wb, 'Part Mark 수량 검증', ['Part Mark','재질','PROFILE','필요 수량','계획 총수량','계산 예외 수량','판정','미확정 수량'],
+            [[r[k] for k in ('title','material','spec','required_quantity','planned_quantity','excluded_quantity','status','pending_quantity')]
+             for r in report['part_mark_reconciliation']], [24,18,32,18,18,18,32,18], paper_size, orientation)
         styled_sheet(wb, '가져오기 제외', ['시트','원본 행','Ass Mark','Part Mark','재질','PROFILE','길이','수량','구분','제외 사유'],
             [[e[k] for k in ('sheet','row','assembly_mark','title','material','spec','length','quantity','code','reason')]
              for e in report['import_exclusions']], [22,12,18,22,18,32,16,12,32,65], paper_size, orientation)
         styled_sheet(wb, '원본 셀 추적', ['시트','원본 행','Ass Mark (원본)','Part Mark (원본)','Grade (원본)','PROFILE (원본)','Length(mm) (원본)',"Q'ty (원본)",'계산 여부'],
             [[i.get('source_sheet',''), i.get('source_row'),
               *[i.get('source_cells',{}).get(k,'') for k in ('assembly_mark','title','material','spec','length','quantity')],
-              '포함' if i.get('included',True) else '계산 예외'] for i in plan['bom']],
+              '미확정 있음' if i.get('pending_quantity') else '포함' if i.get('included',True) else '계산 예외'] for i in plan['bom']],
             [22,12,22,24,20,32,22,18,18], paper_size, orientation)
         audit = plan['import_audit']
         cfg_sheet = wb['계산 설정']
         cfg_sheet.append(['가져오기 시트', audit['sheet']])
         cfg_sheet.append(['원본 파일 SHA-256', audit['source_sha256']])
         cfg_sheet.append(['원본 열', ', '.join(audit['columns'].values())])
+    if plan.get('manufacturing'):
+        styled_sheet(wb,'발주 비교',['구분','신규 발주 본수','신규 발주 총길이','잔재 투입길이','잔재 절단 사용량','총 로스율 %','제작 확정 수량','미확정 수량','최대 사용 길이','최적성'],
+            [[r['label'],r['bar_count'],r['total_new_stock_length'],r['inventory_input_length'],r['inventory_used_length'],r['loss_rate'],r['confirmed_quantity'],r['pending_quantity'],r['max_stock_length'],
+              '조건 내 최적해' if r['optimal'] else '최적해 미확정'] for r in plan['comparison']], [38,18,24,22,22,18,22,18,22,24],paper_size,orientation)
+        styled_sheet(wb,'제작 발주 미확정',['원본 행','Ass Mark','Part Mark','재질','규격','절단 길이','미확정 수량','사유'],
+            [[r[k] for k in ('row','assembly_mark','title','material','spec','length','quantity','reason')] for r in plan['pending']],
+            [12,20,24,18,32,18,18,70],paper_size,orientation)
+        styled_sheet(wb,'승인 후보 기록',['후보 ID','종류','재질','규격','대상 수량','신규 본재/원자재 길이','연결재 길이','잔철','재고 ID','재고 확인','적용 승인','사유'],
+            [[c['id'],c['kind'],c['material'],c['spec'],c['quantity'],c.get('base_length',c.get('stock_length')),c.get('connector_length'),c.get('remnant'),
+              c.get('inventory_id',''),'확인' if c.get('inventory_confirmed') else '', '승인 적용' if c['id'] in plan['manufacturing']['approved_candidate_ids'] else '미적용',c['reason']]
+             for c in plan['manufacturing']['candidates']], [70,30,18,32,18,24,20,18,24,18,22,65],paper_size,orientation)
+        used={r['id']:r for r in plan['inventory_usage']}
+        ledger=[{**stock,'used_quantity':0,'remaining_quantity':stock['quantity'],'input_length':0,'used_length':0,'remnant':0,
+                 **used.get(stock['id'],{})} for stock in plan['manufacturing']['inventory']]
+        styled_sheet(wb,'보유 잔재 사용',['재고 ID','재질','규격','투입 원본 길이','사용 본수','미사용 본수','투입 총길이','절단 사용량','사용 후 잔재','보유 확인'],
+            [[r[k] for k in ('id','material','spec','length','used_quantity','remaining_quantity','input_length','used_length','remnant')]+['확인' if r['confirmed'] else '미확인 · 미사용'] for r in ledger],
+            [24,18,32,22,18,18,22,22,22,18],paper_size,orientation)
+        wb['계산 설정'].append(['운송 원자재 길이 상한',plan['manufacturing']['transport_max_length'] or '추가 상한 미입력'])
+        wb['계산 설정'].append(['가공 원자재 길이 상한',plan['manufacturing']['processing_max_length'] or '추가 상한 미입력'])
     for sheet in wb:
         sheet.page_setup.orientation=orientation
     output = io.BytesIO(); wb.save(output)

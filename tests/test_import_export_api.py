@@ -73,7 +73,7 @@ def test_entire_workflow_sample_import_optimize_exports():
     xlsx = client.get(f"/api/results/{plan['job_id']}.xlsx")
     assert xlsx.status_code == 200
     wb = load_workbook(io.BytesIO(xlsx.content), data_only=False)
-    assert wb.sheetnames == ['원자재 리스트', '조합 리스트', 'BOM', '계산 설정', '계산 제외 부재', '수량 검증']
+    assert wb.sheetnames == ['원자재 리스트', '조합 리스트', 'BOM', '계산 설정', '계산 제외 부재', '수량 검증', '발주 비교', '제작 발주 미확정', '승인 후보 기록', '보유 잔재 사용']
     assert next(row[3] for row in wb['원자재 리스트'].iter_rows(min_row=2, values_only=True) if row[1] == '합 계') == 12
     assert sum(row[3] for row in wb['BOM'].iter_rows(min_row=2, values_only=True)) == 48
     assert all(row[4] > 30 for row in wb['조합 리스트'].iter_rows(min_row=2, values_only=True) if isinstance(row[4], (float, int)))

@@ -11,12 +11,22 @@ from openpyxl import load_workbook
 from steelplan.exports import export_pdf, export_xlsx
 from steelplan.materials import DEFAULT_STOCK_LENGTHS, classify_material
 from steelplan.models import OptimizeRequest, StockSettings
+
 from steelplan.planning import plan_by_material
 from steelplan.reports import build_report
 
 
+def legacy_request(**kwargs):
+    """Preserve regression coverage for the explicitly requested compatibility mode."""
+    kwargs.setdefault("planning_mode", "legacy")
+    kwargs.setdefault("objective", "bar_count")
+    return OptimizeRequest(**kwargs)
+
+
+
+
 def make_plan(items, **kwargs):
-    return plan_by_material(OptimizeRequest(items=items, time_limit=2, **kwargs),
+    return plan_by_material(legacy_request(items=items, time_limit=2, **kwargs),
                             StockSettings(stock_lengths_by_type=DEFAULT_STOCK_LENGTHS))
 
 

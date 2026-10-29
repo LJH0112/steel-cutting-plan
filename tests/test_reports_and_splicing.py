@@ -16,8 +16,18 @@ from steelplan.bom import inspect_bom, parse_bom
 from steelplan.exports import export_pdf, export_xlsx
 from steelplan.materials import DEFAULT_STOCK_LENGTHS
 from steelplan.models import OptimizeRequest, StockSettings
+
 from steelplan.planning import PlanningIssues, plan_by_material, validate_plan_input
 from steelplan.reports import MATERIAL_COLUMNS, COMBINATION_COLUMNS, build_report
+
+
+def legacy_request(**kwargs):
+    """Preserve regression coverage for the explicitly requested compatibility mode."""
+    kwargs.setdefault("planning_mode", "legacy")
+    kwargs.setdefault("objective", "bar_count")
+    return OptimizeRequest(**kwargs)
+
+
 
 
 def part(length, quantity=1, title='A', weight='', **extra):
@@ -25,7 +35,7 @@ def part(length, quantity=1, title='A', weight='', **extra):
 
 
 def plan(items, **extra):
-    return plan_by_material(OptimizeRequest(items=items, time_limit=2, **extra),
+    return plan_by_material(legacy_request(items=items, time_limit=2, **extra),
                             StockSettings(stock_lengths_by_type=DEFAULT_STOCK_LENGTHS))
 
 
@@ -108,7 +118,7 @@ def test_real_format_sample_bom_and_export_quantities_match():
     data = (Path(__file__).parent.parent / 'examples/ts_assem_sample.xlsx').read_bytes()
     info = inspect_bom(data)['sheets'][0]
     parsed = parse_bom(data, info['name'], info['header_row'], info['mapping'])
-    req = OptimizeRequest(items=parsed['items'])
+    req = legacy_request(items=parsed['items'])
     settings = StockSettings(stock_lengths_by_type=DEFAULT_STOCK_LENGTHS)
     validation = validate_plan_input(req, settings)
     p = plan_by_material(req.model_copy(update={'exclude_invalid': True, 'exclusion_token': validation['exclusion_token']}), settings)

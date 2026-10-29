@@ -12,9 +12,19 @@ from openpyxl import load_workbook
 from steelplan.exports import export_pdf, export_xlsx
 from steelplan.materials import DEFAULT_STOCK_LENGTHS
 from steelplan.models import OptimizeRequest, StockSettings
+
 from steelplan.planning import plan_by_material
 from steelplan.reports import (build_report, MATERIAL_WIDTHS, COMBINATION_WIDTHS,
                                REPORT_ROW_HEIGHT, REPORT_HEADER_HEIGHT, REPORT_PAGE_MARGIN)
+
+
+def legacy_request(**kwargs):
+    """Preserve regression coverage for the explicitly requested compatibility mode."""
+    kwargs.setdefault("planning_mode", "legacy")
+    kwargs.setdefault("objective", "bar_count")
+    return OptimizeRequest(**kwargs)
+
+
 
 
 def part(title, qty, length=2000, **extra):
@@ -23,7 +33,7 @@ def part(title, qty, length=2000, **extra):
 
 
 def plan(items, **extra):
-    return plan_by_material(OptimizeRequest(items=items, time_limit=2, **extra),
+    return plan_by_material(legacy_request(items=items, time_limit=2, **extra),
                             StockSettings(stock_lengths_by_type=DEFAULT_STOCK_LENGTHS))
 
 
@@ -160,7 +170,7 @@ def test_real_bom_member_rows_and_excel_quantities_match_each_source():
     data = (Path(__file__).parent.parent / 'examples/ts_assem_sample.xlsx').read_bytes()
     info = inspect_bom(data)['sheets'][0]
     parsed = parse_bom(data, info['name'], info['header_row'], info['mapping'])
-    request = OptimizeRequest(items=parsed['items'], time_limit=2)
+    request = legacy_request(items=parsed['items'], time_limit=2)
     settings = StockSettings(stock_lengths_by_type=DEFAULT_STOCK_LENGTHS)
     validation = validate_plan_input(request, settings)
     p = plan_by_material(request.model_copy(update={'exclude_invalid': True, 'exclusion_token': validation['exclusion_token']}), settings)

@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta, timezone
 import re
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationInfo, field_validator, model_validator
 
 from .materials import DEFAULT_STOCK_LENGTHS, compact
 
@@ -35,6 +35,7 @@ class BOMItem(BaseModel):
     input_index: int | None = Field(default=None, ge=0, le=999)
     source_sheet: str = Field(default='', max_length=100)
     assembly_mark: str = Field(default='', max_length=150)
+    required_inventory_id: str | None = Field(default=None, max_length=100)
     source_cells: dict[Literal['material', 'spec', 'title', 'assembly_mark', 'length', 'quantity'],
                        Annotated[str, StringConstraints(max_length=500, strip_whitespace=False)]] = Field(default_factory=dict)
 
@@ -79,7 +80,24 @@ class ImportAudit(BaseModel):
     source_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
 
 
+class RemnantStock(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    id: str = Field(min_length=1, max_length=100, pattern=r'^[\w가-힣.-]+$')
+    material: str = Field(min_length=1, max_length=100)
+    spec: str = Field(min_length=1, max_length=150)
+    length: Decimal = Field(gt=0, le=100000)
+    quantity: int = Field(gt=0, le=5000, strict=True)
+    confirmed: bool = Field(default=False, strict=True)
+
+    @field_validator('length', mode='before')
+    @classmethod
+    def validate_length(cls, value):
+        return millimeters(value)
+
+
 class OptimizeRequest(BaseModel):
+    planning_mode: Literal['manufacturing', 'legacy'] = 'manufacturing'
+    objective: Literal['total_length', 'bar_count'] = 'total_length'
     items: list[BOMItem] = Field(min_length=1, max_length=1000)
     stock_lengths: list[Decimal] | None = Field(default=None, min_length=1, max_length=20)
     kerf: Decimal = Field(default=Decimal('3'), ge=0, le=100)
@@ -96,6 +114,21 @@ class OptimizeRequest(BaseModel):
     source_filename: str = Field(default='', max_length=250)
     report_date: date = Field(default_factory=lambda: datetime.now(timezone(timedelta(hours=9))).date())
     import_audit: ImportAudit | None = None
+    remnant_inventory: list[RemnantStock] = Field(default_factory=list, max_length=100)
+    transport_max_length: Decimal | None = Field(default=None, gt=30, le=100000)
+    processing_max_length: Decimal | None = Field(default=None, gt=30, le=100000)
+    proposal_token: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
+    approved_candidate_ids: list[str] = Field(default_factory=list, max_length=2000)
+
+    @model_validator(mode='after')
+    def unique_inventory(self):
+        if len({r.id for r in self.remnant_inventory}) != len(self.remnant_inventory):
+            raise ValueError('잔재 재고 ID가 중복되었습니다.')
+        if sum(r.quantity for r in self.remnant_inventory) > 5000:
+            raise ValueError('잔재 재고는 총 5,000본 이하여야 합니다.')
+        if len(set(self.approved_candidate_ids)) != len(self.approved_candidate_ids):
+            raise ValueError('중복된 승인 후보가 있습니다.')
+        return self
 
     @field_validator('project_name', 'project_section', 'source_filename')
     @classmethod
@@ -116,10 +149,10 @@ class OptimizeRequest(BaseModel):
             raise ValueError('발주 길이는 30mm보다 커야 합니다.')
         return parsed
 
-    @field_validator('kerf', 'splice_allowance', 'reusable_remnant_min', mode='before')
+    @field_validator('kerf', 'splice_allowance', 'reusable_remnant_min', 'transport_max_length', 'processing_max_length', mode='before')
     @classmethod
     def validate_kerf(cls, value):
-        return millimeters(value)
+        return None if value is None else millimeters(value)
 
 
 class StockSettings(BaseModel):

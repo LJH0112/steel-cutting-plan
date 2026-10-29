@@ -88,7 +88,9 @@ def render_pdf(plan, report, summary, notes, paper_size, orientation, section):
             draw_fitted(can,'[공사구분]  '+meta.get('project_section',''),margin,height-82,content_width-130)
             can.setFont(FONT,9);can.drawRightString(width-margin,height-68,'[날 짜]  '+meta.get('report_date',''))
             if group:
-                draw_fitted(can,f"[재질] {group['material']}    [규격] {group['spec']}    [단위중량]",margin,height-101,content_width)
+                sources=' / '.join(f"{p['number']}={p['inventory_id']}" for p in group['patterns'] if p.get('inventory_id'))
+                approved=', '.join(str(p['number']) for p in group['patterns'] if p.get('approval_id'))
+                draw_fitted(can,f"[재질] {group['material']}    [규격] {group['spec']}    [단위중량]"+('    [재고 패턴] '+sources if sources else '')+('    [승인 패턴] '+approved if approved else ''),margin,height-101,content_width)
             can.restoreState()
         return draw
     class NumberedCanvas(canvas.Canvas):
@@ -160,7 +162,7 @@ def render_pdf(plan, report, summary, notes, paper_size, orientation, section):
             rows.append([group['total'][k]for k,_ in COMBINATION_COLUMNS])
             story.append(table([label for _,label in COMBINATION_COLUMNS],rows,COMBINATION_WIDTHS,spans=spans,ends=ends,totals=[len(rows)]))
     # Approval and validation details use their own section, keeping the reference forms uncluttered.
-    if plan.get('splices') or report['excluded'] or report.get('import_exclusions') or section=='all':
+    if plan.get('splices') or plan.get('manufacturing') or report['excluded'] or report.get('import_exclusions') or section=='all':
         start_page('validation','수량 검증 · 이음 승인 대상')
         story += [p(summary,heading),p(notes),Spacer(1,8)]
         if plan.get('splices'):
@@ -173,21 +175,47 @@ def render_pdf(plan, report, summary, notes, paper_size, orientation, section):
         if report['excluded']:
             story += [p('사용자가 확인하고 제외한 부재',heading),table(['행','부재 번호','규격','절단길이','수량','사유'],
                 [[e['row'],e['title'],e['spec'],float(e['length']),e['quantity'],e['display_reason']]for e in report['excluded']],[30,80,110,55,35,140])]
-        story += [p('원본 행별 수량 검증',heading),table(['행','부재 번호','BOM 수량','완성 계획','제외','제작 절편','판정'],
-            [[r[k]for k in ('row','title','required_quantity','planned_quantity','excluded_quantity','component_quantity','status')]for r in report['reconciliation']],
-            [30,110,50,50,40,55,100])]
-        story += [Spacer(1,8),p('실제 절단 후 잔재 >30mm. 무절단 이음 통재는 날 손실과 잔철 0mm. 원본 각 행의 제작 수량과 길이를 모두 대조했으며, 원자재 총중량은 단위중량 정보가 없으면 공란입니다.')]
+        story += [p('원본 행별 수량 검증',heading),table(['행','Part Mark','BOM 수량','완성 확정','미확정','제외','제작 절편','판정'],
+            [[r[k]for k in ('row','title','required_quantity','planned_quantity','pending_quantity','excluded_quantity','component_quantity','status')]for r in report['reconciliation']],
+            [30,100,45,45,45,35,50,90])]
+        story += [Spacer(1,8),p('실제 절단 잔재는 기본 >30mm이며 승인 ID가 있는 예외만 0~30mm를 허용합니다. 승인 이음의 무절단 본재는 날 손실 0mm. 원본 각 행의 제작 수량·길이·미확정 수량을 대조했습니다. 원자재 총중량은 단위중량 미제공 시 공란입니다.')]
+        if plan.get('manufacturing'):
+            start_page('purchase-comparison','신규 발주 · 현장 잔재 비교')
+            story += [p('신규 발주 총길이를 먼저 최소화하고 같은 길이에서 신규 본수를 최소화합니다. 비교안별 제작 확정·미확정 수량이 다르면 동일 제작 범위의 절감액처럼 해석하지 않습니다. 로스는 날 손실·이음 여유·사용 후 잔재를 포함합니다.'),Spacer(1,8),
+                table(['구분','발주 본수','신규 총길이','잔재 사용량','로스율 %','확정 수량','미확정 수량','최대 길이'],
+                    [[r[k]for k in ('label','bar_count','total_new_stock_length','inventory_used_length','loss_rate','confirmed_quantity','pending_quantity','max_stock_length')]for r in plan['comparison']],
+                    [120,45,75,70,45,45,45,65])]
+            limits=plan['manufacturing']
+            story += [Spacer(1,8),p(f"운송 원자재 상한: {limits['transport_max_length'] or '미입력'}mm / 가공 원자재 상한: {limits['processing_max_length'] or '미입력'}mm. 미입력은 추가 상한을 적용하지 않으며 자재별 발주 규칙은 유지합니다.")]
+            if plan['pending']:
+                story += [p('제작·발주 미확정 부재',heading),table(['행','Ass Mark','Part Mark','규격','길이','미확정 수량','사유'],
+                    [[r[k]for k in ('row','assembly_mark','title','spec','length','quantity','reason')]for r in plan['pending']],
+                    [30,50,65,100,55,45,145])]
+            if limits['inventory']:
+                used={r['id']:r for r in plan['inventory_usage']}
+                story += [p('입력 잔재 · 보유 확인 및 사용 내역',heading),table(['재고 ID','재질','규격','보유 확인','사용 본수','절단 사용량','사용 후 잔재'],
+                    [[r['id'],r['material'],r['spec'],'확인' if r['confirmed'] else '미확인·미사용',
+                      used.get(r['id'],{}).get('used_quantity',0),used.get(r['id'],{}).get('used_length',0),used.get(r['id'],{}).get('remnant',0)]for r in limits['inventory']],
+                    [70,50,110,70,50,70,70])]
+            candidates=plan['manufacturing']['candidates']
+            if candidates:
+                start_page('approval-record','잔재 예외 · 이음 승인 기록')
+                story += [p('승인 ID는 표시한 원본 수량·절단 패턴·재고·날 손실·이음 여유·길이 상한에만 유효합니다. 미승인 이음 및 보유 미확인 재고는 확정 발주에 포함하지 않습니다.'),Spacer(1,8),
+                    table(['후보 ID','종류','규격','대상 수량','본재/원자재','연결재','잔철','재고 ID','승인 상태'],
+                        [[c['id'],c['kind'],c['spec'],c['quantity'],c.get('base_length',c.get('stock_length')),c.get('connector_length'),c.get('remnant'),c.get('inventory_id'),
+                          '승인 적용' if c['id'] in plan['manufacturing']['approved_candidate_ids'] else '미적용'] for c in candidates],
+                        [90,65,95,40,60,45,40,55,55])]
         if plan.get('import_audit'):
             start_page('part-mark-check', 'Part Mark 수량 검증')
-            story += [p('필요 수량 = 계획 총수량 + 계산 예외 수량. 예외를 자동 제작·누락하지 않으며 사유는 계산 제외 부재에 표시합니다.'),Spacer(1,8),
-                table(['Part Mark','Grade','PROFILE','필요 수량','계획 총수량','계산 예외','판정'],
-                    [[r[k]for k in ('title','material','spec','required_quantity','planned_quantity','excluded_quantity','status')]
-                     for r in report['part_mark_reconciliation']], [75,50,115,45,45,45,90])]
+            story += [p('필요 수량 = 제작 확정 + 미확정 + 계산 예외 수량. 원본 Part Mark별 수량과 각 행의 제작 길이를 대조합니다.'),Spacer(1,8),
+                table(['Part Mark','Grade','PROFILE','필요 수량','제작 확정','미확정','계산 예외','판정'],
+                    [[r[k]for k in ('title','material','spec','required_quantity','planned_quantity','pending_quantity','excluded_quantity','status')]
+                     for r in report['part_mark_reconciliation']], [75,50,115,45,45,45,45,90])]
             start_page('source-trace', '원본 Part Mark · Ass Mark 추적')
-            story += [p('비고는 Part Mark 원문만 표시합니다. Ass Mark를 접두사로 붙이지 않으며 조립 요약행 수량을 곱하지 않습니다.'), Spacer(1,8),
+            story += [p('조합 비고는 Ass Mark_Part Mark로 표시하고, 아래 표는 원본 식별자를 각각 보존합니다. 조립 요약행 수량을 다시 곱하지 않습니다.'), Spacer(1,8),
                 table(['행','Ass Mark','Part Mark','Grade','PROFILE','길이','원본 수량','계산 여부'],
                     [[i.get('source_row'),i.get('assembly_mark',''),i.get('title',''),i['material'],i['spec'],float(i['length']),i['quantity'],
-                      '포함' if i.get('included',True) else '계산 예외'] for i in plan['bom']],
+                      '미확정 있음' if i.get('pending_quantity') else '포함' if i.get('included',True) else '계산 예외'] for i in plan['bom']],
                     [30,55,65,50,105,55,40,55])]
         if report.get('import_exclusions'):
             start_page('import-exclusions', '가져오기 제외 내역')

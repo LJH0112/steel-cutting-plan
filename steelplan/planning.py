@@ -44,6 +44,9 @@ def assess_items(items, kerf, settings, enable_splice_planning=False):
 
 
 def validate_plan_input(request, settings):
+    if request.planning_mode=='manufacturing':
+        from .manufacturing import validate_manufacturing
+        return validate_manufacturing(request,settings)
     if request.import_audit and any(i.source_format != 'ts_bom' or i.source_sheet != 'TS BOM LIST' for i in request.items):
         raise ValueError('TS BOM LIST 가져오기 결과에는 해당 시트의 대상 부재만 사용할 수 있습니다.')
     if request.stock_lengths is not None:
@@ -66,6 +69,9 @@ def validate_plan_input(request, settings):
 
 
 def plan_by_material(request, settings):
+    if request.planning_mode=='manufacturing':
+        from .manufacturing import plan_manufacturing
+        return plan_manufacturing(request,settings)
     validation = validate_plan_input(request, settings)
     issues = validation['issues']
     if issues and (not request.exclude_invalid or request.exclusion_token != validation['exclusion_token']):

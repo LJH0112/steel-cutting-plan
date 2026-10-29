@@ -23,7 +23,7 @@ from steelplan.planning import PlanningIssues, plan_by_material, validate_plan_i
 from steelplan.settings import load_settings, save_settings
 
 ROOT = Path(__file__).resolve().parent
-app = FastAPI(title='STEEL PLAN · 철골 절단 최적화', version='1.3.0')
+app = FastAPI(title='STEEL PLAN · 철골 절단 최적화', version='1.4.0')
 app.mount('/static', StaticFiles(directory=ROOT / 'static'), name='static')
 app.mount('/fonts', StaticFiles(directory=ROOT / 'assets/fonts'), name='fonts')
 RESULTS = OrderedDict()
@@ -125,7 +125,9 @@ async def headers(file: UploadFile = File(...), sheet: str = Form(...), header_r
 @app.post('/api/preview')
 async def preview(file: UploadFile = File(...), sheet: str = Form(...), header_row: int = Form(...),
                   mapping: str = Form(...), kerf: str = Form('3'), splice_allowance: str = Form('5'),
-                  reusable_remnant_min: str = Form('5'), enable_splice_planning: bool = Form(True)):
+                  reusable_remnant_min: str = Form('5'), enable_splice_planning: bool = Form(True),
+                  planning_mode: Literal['manufacturing','legacy'] = Form('manufacturing'),
+                  manufacturing_settings: str = Form('{}')):
     try:
         mapped = json.loads(mapping)
         if not isinstance(mapped, dict):
@@ -135,9 +137,12 @@ async def preview(file: UploadFile = File(...), sheet: str = Form(...), header_r
     data = await import_operation(parse_bom, await upload_bytes(file), sheet, header_row, mapped)
     if not data['errors'] and data['items']:
         try:
+            controls=json.loads(manufacturing_settings)
+            if not isinstance(controls,dict) or set(controls)-{'remnant_inventory','transport_max_length','processing_max_length'}:
+                raise ValueError('현장 재고·길이 상한 형식이 올바르지 않습니다.')
             request = OptimizeRequest(items=data['items'], kerf=kerf, splice_allowance=splice_allowance,
                                       reusable_remnant_min=reusable_remnant_min, enable_splice_planning=enable_splice_planning,
-                                      import_audit=data.get('import_audit'))
+                                      import_audit=data.get('import_audit'),planning_mode=planning_mode,**controls)
             data.update(validate_plan_input(request, current_settings()))
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc

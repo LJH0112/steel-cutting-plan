@@ -1,6 +1,8 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const state = {file: null, sheets: [], items: [], issues: [], result: null, working: false, validationVersion: 0, importAudit: null};
+state.approvedCandidates = new Set();
+state.proposalToken = null;
 const fields = {material: '재질', spec: '규격', length: '길이 (mm)', quantity: '수량'};
 const fmt = value => Number(value).toLocaleString('ko-KR', {maximumFractionDigits: 3});
 const esc = value => String(value).replace(/[&<>"']/g, char => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[char]));
@@ -45,6 +47,8 @@ function clearResults() {
 function clearBOM() {
   state.validationVersion++;
   state.items = [];
+  state.approvedCandidates.clear();state.proposalToken=null;
+  $('review-panel').hidden=true;
   state.importAudit = null;
   $('import-preview').hidden = true;
   state.validationPending = false;
@@ -73,6 +77,7 @@ function sheetForm() {
   form.append('splice_allowance', $('splice-allowance').value);
   form.append('reusable_remnant_min', $('reuse-min').value);
   form.append('enable_splice_planning', String($('enable-splice').checked));
+  form.append('manufacturing_settings',JSON.stringify(manufacturingControls()));
   return form;
 }
 function renderMapping(headers, mapping, locked = false) {
@@ -190,6 +195,7 @@ $('kerf').addEventListener('input', revalidate);
 $('enable-splice').addEventListener('change', revalidate);
 ['splice-approved', 'weight-basis', 'project-name', 'project-section', 'report-date'].forEach(id => $(id).addEventListener('change', clearResults));
 $('time-limit').addEventListener('input', clearResults);
+['transport-max','processing-max'].forEach(id=>$(id).addEventListener('change',revalidate));
 $('exclude-invalid').addEventListener('change', () => { clearResults(); updateCalculateButton(); });
 $('optimize').addEventListener('click', async () => {
   if (state.working || !state.items.length) return;
@@ -202,6 +208,7 @@ $('optimize').addEventListener('click', async () => {
       body: JSON.stringify({items: state.items, kerf, time_limit: Number($('time-limit').value), exclude_invalid: $('exclude-invalid').checked, exclusion_token: state.exclusionToken,
         splice_allowance: $('splice-allowance').value, reusable_remnant_min: $('reuse-min').value,
         splice_details_approved: $('splice-approved').checked, enable_splice_planning: $('enable-splice').checked,
+        ...manufacturingControls(), proposal_token:state.proposalToken,approved_candidate_ids:[...state.approvedCandidates],
         import_audit: state.importAudit, weight_basis: $('weight-basis').value, project_name: $('project-name').value, project_section: $('project-section').value, source_filename: state.file?.name || '', ...($('report-date').value ? {report_date: $('report-date').value} : {})})});
     renderResult();
     $('results-section').scrollIntoView({behavior: 'smooth', block: 'start'});
@@ -215,7 +222,7 @@ function renderResult() {
   $('result-empty').hidden = true;
   $('result-content').hidden = false;
   $('exports').hidden = false;
-  $('result-badge').textContent = s.optimal ? '최적해 증명 완료' : '실행 가능 해 · 최적해 미확정';
+  $('result-badge').textContent = (s.optimal ? '현재 확정 수요·승인 조건 내 최적해' : '실행 가능 해 · 최적해 미확정') + (s.pending_piece_count ? ` · 제작 미확정 ${fmt(s.pending_piece_count)}개` : '');
   $('step3').classList.add('current');
   metric('metric-bars', s.bar_count, '본');
   metric('metric-loss', s.loss_rate, '%');
@@ -232,17 +239,18 @@ function renderResult() {
   $('patterns-list').innerHTML = report.combination_groups.map(group => combinationGroupHTML(group, report.combination_columns)).join('');
   document.querySelectorAll('.combination-table').forEach(table => applyReportLayout(table, report.combination_layout));
   renderSplices(result);
+  renderManufacturing(result);
   const meta = result.report_metadata || {};
   for (const [id,title] of [['materials-project-header','원자재 물량 집계표'], ['combinations-project-header','조합 리스트']]) {
     $(id).innerHTML = `<h2>${title}</h2><div><span>[공 사 명] ${esc(meta.project_name || '')}</span><span>[날 짜] ${esc(meta.report_date || '')}</span></div><div><span>[공사구분] ${esc(meta.project_section || '')}</span><span>[파일명] ${esc(meta.source_filename || '')}</span></div>`;
   }
-  $('quantity-body').innerHTML = report.reconciliation.map(r => `<tr><td>${r.row}</td><td>${esc(r.title)}</td><td>${esc(r.spec)}</td><td>${r.required_quantity}</td><td>${r.planned_quantity}</td><td>${r.excluded_quantity}</td><td>${r.component_quantity}</td><td>${esc(r.status)}</td></tr>`).join('');
+  $('quantity-body').innerHTML = report.reconciliation.map(r => `<tr><td>${r.row}</td><td>${esc(r.title)}</td><td>${esc(r.spec)}</td><td>${r.required_quantity}</td><td>${r.planned_quantity}</td><td>${r.excluded_quantity}</td><td>${r.pending_quantity || 0}</td><td>${r.component_quantity}</td><td>${esc(r.status)}</td></tr>`).join('');
   $('part-mark-details').hidden = !report.part_mark_reconciliation?.length;
-  $('part-mark-body').innerHTML = (report.part_mark_reconciliation || []).map(r => `<tr><td>${esc(r.title)}</td><td>${esc(r.material)}</td><td>${esc(r.spec)}</td><td class="numeric">${r.required_quantity}</td><td class="numeric">${r.planned_quantity}</td><td class="numeric">${r.excluded_quantity}</td><td>${esc(r.status)}</td></tr>`).join('');
+  $('part-mark-body').innerHTML = (report.part_mark_reconciliation || []).map(r => `<tr><td>${esc(r.title)}</td><td>${esc(r.material)}</td><td>${esc(r.spec)}</td><td class="numeric">${r.required_quantity}</td><td class="numeric">${r.planned_quantity}</td><td class="numeric">${r.excluded_quantity}</td><td class="numeric">${r.pending_quantity || 0}</td><td>${esc(r.status)}</td></tr>`).join('');
 
-  $('result-settings').textContent = `${Object.entries(result.settings.stock_lengths_by_type).map(([k,v]) => `${k}: ${v.length ? v.map(fmt).join(', ') + 'mm' : '미설정'}`).join(' / ')} · 날 손실 ${fmt(result.settings.kerf)}mm/개 · 잔재 > 30mm · 총 제품 ${fmt(s.total_parts_length)}mm · 총 날 손실 ${fmt(s.total_kerf_loss)}mm`;
+  $('result-settings').textContent = `${Object.entries(result.settings.stock_lengths_by_type).map(([k,v]) => `${k}: ${v.length ? v.map(fmt).join(', ') + 'mm' : '미설정'}`).join(' / ')} · 날 손실 ${fmt(result.settings.kerf)}mm/개 · 잔재 > 30mm (승인 예외 별도) · 총 제품 ${fmt(s.total_parts_length)}mm · 총 날 손실 ${fmt(s.total_kerf_loss)}mm`;
   $('solver-status').innerHTML = result.statuses.map(r => `<li>${esc(r.material)} / ${esc(r.spec)} — ${esc(r.detail)}</li>`).join('');
-  $('excluded-summary').textContent = result.excluded.length ? `${result.excluded.length}행 · ${fmt(s.excluded_piece_count)}개 제외 / 입력 ${fmt(s.input_piece_count)}개 = 생산 ${fmt(s.piece_count)}개 + 제외 ${fmt(s.excluded_piece_count)}개. 사용자가 제외를 선택한 부재입니다.` : '계산 제외 부재 없음 · 모든 입력 부재를 계산했습니다.';
+  $('excluded-summary').textContent = result.manufacturing ? `원본 ${fmt(s.input_piece_count)}개 = 제작 확정 ${fmt(s.piece_count)}개 + 미확정 ${fmt(s.pending_piece_count)}개. 미확정 부재는 위 목록에 보존했습니다.` : result.excluded.length ? `${result.excluded.length}행 · ${fmt(s.excluded_piece_count)}개 제외 / 입력 ${fmt(s.input_piece_count)}개 = 생산 ${fmt(s.piece_count)}개 + 제외 ${fmt(s.excluded_piece_count)}개.` : '계산 제외 부재 없음';
   $('excluded-body').innerHTML = issueRows(result.excluded);
   renderImportExclusions('import-results', 'import-results-body', 'import-results-summary', result.import_audit);
   if (s.total_splice_allowance) $('result-settings').textContent += ` · 이음 여유 합계 ${fmt(s.total_splice_allowance)}mm · 이음 여유 포함 순 로스율 ${fmt(s.net_loss_rate)}%`;
@@ -266,7 +274,9 @@ function applyReportLayout(table, layout) {
   table.insertAdjacentHTML('afterbegin', html);
 }
 function combinationGroupHTML(group, columns) {
-  const heading = `[재질] ${esc(group.material)}　 [규격] ${esc(group.spec)}　 [단위중량]`;
+  const inventory=group.patterns.filter(p=>p.inventory_id).map(p=>`${p.number}=${p.inventory_id}`).join(' / ');
+  const approved=group.patterns.filter(p=>p.approval_id).map(p=>p.number).join(', ');
+  const heading = `[재질] ${esc(group.material)}　 [규격] ${esc(group.spec)}　 [단위중량]`+(inventory ? `　 [재고 패턴] ${esc(inventory)}` : '')+(approved ? `　 [승인 패턴] ${approved}` : '');
   const bodies = group.patterns.map(pattern => {
     const rows = pattern.rows.map((row, index) => {
       const common = index ? '' : columns.slice(0, 6).map(c => fixedCellHTML(pattern[c.key], c.key, `rowspan="${pattern.rows.length}"`)).join('');
@@ -323,10 +333,64 @@ function renderImportExclusions(sectionId, bodyId, summaryId, audit) {
     `다른 시트 ${counts.SHEET_NOT_SELECTED || 0}개 / 대상 외 자재 ${counts.OUTSIDE_PROFILE_SCOPE || 0}행 / 조립 요약 ${counts.ASSEMBLY_SUMMARY || 0}행 / 소계·합계 ${counts.SUBTOTAL || 0}행. 조립 요약 수량은 상세 부재 수량에 다시 더하지 않습니다.`;
   $(bodyId).innerHTML = entries.map(e => `<tr><td>${esc(e.sheet)}</td><td>${e.row ?? ''}</td><td>${esc(e.assembly_mark)}</td><td>${esc(e.title)}</td><td>${esc(e.material)}</td><td>${esc(e.spec)}</td><td>${esc(e.length)}</td><td>${esc(e.quantity)}</td><td>${esc(e.reason)}</td></tr>`).join('');
 }
+function manufacturingControls() {
+  const remnant_inventory=[...$('inventory-body').querySelectorAll('tr')].map(row=>({
+    id:row.querySelector('[data-inventory="id"]').value,
+    material:row.querySelector('[data-inventory="material"]').value,
+    spec:row.querySelector('[data-inventory="spec"]').value,
+    length:row.querySelector('[data-inventory="length"]').value,
+    quantity:Number(row.querySelector('[data-inventory="quantity"]').value),
+    confirmed:row.querySelector('[data-inventory="confirmed"]').checked
+  }));
+  return {remnant_inventory,transport_max_length:$('transport-max').value || null,processing_max_length:$('processing-max').value || null};
+}
+$('add-inventory').addEventListener('click',()=>{
+  const tr=document.createElement('tr');
+  tr.innerHTML=['id','material','spec','length','quantity'].map(key=>`<td><input data-inventory="${key}" aria-label="잔재 ${key}" type="${['length','quantity'].includes(key)?'number':'text'}" ${key==='quantity'?'min="1" step="1"':'step="0.001"'}></td>`).join('')+'<td><input data-inventory="confirmed" aria-label="실제 재고 확인" type="checkbox"></td><td><button type="button" class="text-button">삭제</button></td>';
+  tr.querySelector('button').addEventListener('click',()=>{tr.remove();revalidate();});
+  tr.addEventListener('change',revalidate);$('inventory-body').append(tr);
+  clearResults();state.approvedCandidates.clear();state.validationVersion++;state.validationPending=true;
+  if (state.items.length) {$('optimize').disabled=true;$('calculate-hint').textContent='추가한 잔재 정보를 입력해 주세요.';}
+});
+const markOf = row=>[row.assembly_mark,row.title].filter(Boolean).join('_');
+function pendingRows(rows) {
+  return rows.map(r=>`<tr><td>${r.row}</td><td>${esc(markOf(r))}</td><td>${esc(r.spec)}</td><td class="numeric">${fmt(r.length)}</td><td class="numeric">${r.quantity}</td><td>${esc(r.reason)}</td></tr>`).join('');
+}
+function renderReview(data) {
+  const candidates=data.candidate_reviews || [],pending=data.pending_reviews || [];
+  $('review-panel').hidden=!(candidates.length || pending.length);
+  $('review-pending-body').innerHTML=pendingRows(pending);
+  $('candidate-list').innerHTML=candidates.map(c=>{
+    const isCut=c.kind==='SHORT_REMNANT_PATTERN';
+    const details=isCut ? `${c.cut_pattern.map(p=>`${fmt(p.length)}mm ${p.quantity}개/본`).join(' + ')} / ${c.bar_count}본 / 잔철 ${fmt(c.remnant)}mm` : `본재 ${fmt(c.base_length)}mm + 연결재 ${fmt(c.connector_length)}mm − 이음 여유 ${fmt(c.allowance)}mm / 재고 ${c.inventory_id ? esc(c.inventory_id)+' ('+fmt(c.inventory_length)+'mm)' : '미확인'}`;
+    const marks=isCut ? c.members.map(markOf).join(', ') : markOf(c);
+    return `<label class="candidate-row"><input type="checkbox" data-candidate-id="${c.id}" ${c.eligible_for_approval?'':'disabled'} ${state.approvedCandidates.has(c.id)?'checked':''}><span><strong>${isCut?'잔재 예외 조합 승인':'이음 위치·연결 상세 승인'} · ${esc(c.material)} / ${esc(c.spec)}</strong><br>${esc(marks)} · 대상 ${c.quantity}개<br>${details}<br><small>${esc(c.reason)}</small></span></label>`;
+  }).join('');
+  $('candidate-list').querySelectorAll('[data-candidate-id]').forEach(input=>input.addEventListener('change',()=>{
+    if(input.checked)state.approvedCandidates.add(input.dataset.candidateId);else state.approvedCandidates.delete(input.dataset.candidateId);
+    clearResults();
+  }));
+}
+function renderManufacturing(result) {
+  const m=result.manufacturing;
+  $('manufacturing-results').hidden=!m;
+  if (!m)return;
+  $('comparison-body').innerHTML=result.comparison.map(r=>`<tr><td>${esc(r.label)}</td>${['bar_count','total_new_stock_length','inventory_used_length','loss_rate','confirmed_quantity','pending_quantity','max_stock_length'].map(k=>`<td class="numeric">${fmt(r[k])}</td>`).join('')}</tr>`).join('');
+  $('pending-results-body').innerHTML=pendingRows(result.pending || []);
+  const used=result.inventory_usage.map(r=>`${r.id}: ${r.used_quantity}본 / 절단 사용 ${fmt(r.used_length)}mm / 사용 후 잔재 ${fmt(r.remnant)}mm`).join(' · ');
+  $('manufacturing-summary').textContent=`확정 신규발주 ${fmt(result.summary.total_new_stock_length)}mm. ${used || '확인 보유 잔재 사용 없음'}. 운송 상한 ${m.transport_max_length ? fmt(m.transport_max_length)+'mm':'추가 상한 미입력'}, 가공 상한 ${m.processing_max_length ? fmt(m.processing_max_length)+'mm':'추가 상한 미입력'}.`;
+  $('fabrication-status').hidden=false;
+  $('fabrication-status').textContent=`제작 확정 ${result.summary.piece_count}개 / 제작·발주 미확정 ${result.summary.pending_piece_count}개. 이음 ${m.approved_splices.length}건 및 승인 잔재 예외만 확정 계획에 반영했습니다.`;
+}
 function applyValidation(data) {
   state.validationPending = false;
   state.exclusionToken = data.exclusion_token;
   state.issues = data.issues || [];
+  if (data.proposal_token) {
+    if (state.proposalToken!==data.proposal_token) state.approvedCandidates.clear();
+    state.proposalToken=data.proposal_token;
+    renderReview(data);
+  }
   const splices = data.splice_candidates || [];
   $('splice-preview').hidden = !splices.length;
   $('splice-preview-text').textContent = splices.map(i => `${i.source_row || ''}행 ${i.title || ''} / ${i.spec} / ${fmt(i.length)}mm × ${i.quantity}개`).join(' · ') + ' — 제외하지 않고 6m 통재 본재 + 연결재로 계획합니다. 승인 전 검토 필요.';
@@ -344,13 +408,14 @@ function updateCalculateButton() {
 }
 async function revalidate() {
   clearResults();
+  state.approvedCandidates.clear();
   if (!state.items.length) return;
   const version = ++state.validationVersion;
   state.validationPending = true;
   $('exclude-invalid').checked = false;
   updateCalculateButton();
   try {
-    const data = await api('/api/validate', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({items: state.items, import_audit: state.importAudit, kerf: $('kerf').value, splice_allowance: $('splice-allowance').value, reusable_remnant_min: $('reuse-min').value, enable_splice_planning: $('enable-splice').checked})});
+    const data = await api('/api/validate', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({items: state.items, ...manufacturingControls(), import_audit: state.importAudit, kerf: $('kerf').value, splice_allowance: $('splice-allowance').value, reusable_remnant_min: $('reuse-min').value, enable_splice_planning: $('enable-splice').checked})});
     if (version !== state.validationVersion) return;
     state.validationPending = false;
     applyValidation(data);

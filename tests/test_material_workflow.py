@@ -13,7 +13,17 @@ from steelplan.bom import inspect_bom, parse_bom
 from steelplan.exports import export_pdf, export_xlsx
 from steelplan.materials import DEFAULT_STOCK_LENGTHS, classify_material
 from steelplan.models import OptimizeRequest, StockSettings
+
 from steelplan.planning import PlanningIssues, assess_items, plan_by_material, validate_plan_input
+
+
+def legacy_request(**kwargs):
+    """Preserve regression coverage for the explicitly requested compatibility mode."""
+    kwargs.setdefault("planning_mode", "legacy")
+    kwargs.setdefault("objective", "bar_count")
+    return OptimizeRequest(**kwargs)
+
+
 
 client = TestClient(app)
 HEADERS = ['ITEM', 'TITLE', 'MATL', 'DESCRIPTION', 'LENGTH', 'QTY', 'WEIGHT.KG', 'PAINT.M']
@@ -124,7 +134,7 @@ def test_type_allowed_lengths_and_material_spec_isolation():
              item('[125*65*6*8', 4800, 2), item('L65*65*5', 4900, 2),
              item('C150*75*20*3.2', 4900, 2), item('D19', 3900, 2),
              {**item('P100*100*4', 2900, 1), 'material': 'SM355'}, item('P150*150*4', 2900, 1)]
-    request = OptimizeRequest(items=parts, time_limit=5)
+    request = legacy_request(items=parts, time_limit=5)
     plan = plan_by_material(request, settings())
     actual = Counter()
     for p in plan['patterns']:
@@ -151,7 +161,7 @@ def test_fixed_length_overflow_requires_explicit_exclusion_and_preserves_identit
     parts = [item('P100*100*4', 6184, 2, source_row=7, title='P-OVER'),
              item('P100*100*4', 2900, 3, source_row=8, title='P-OK'),
              item('PLT12*100', 2000, 1, source_row=9, title='PL-01')]
-    request = OptimizeRequest(items=parts, time_limit=3, enable_splice_planning=False)
+    request = legacy_request(items=parts, time_limit=3, enable_splice_planning=False)
     with pytest.raises(PlanningIssues) as caught:
         plan_by_material(request, settings())
     exception = caught.value.issues[0]
@@ -180,13 +190,13 @@ def test_fixed_length_overflow_requires_explicit_exclusion_and_preserves_identit
 
 def test_all_excluded_is_not_a_zero_test_success():
     with pytest.raises(ValueError, match='정상 부재가 없습니다'):
-        plan_by_material(confirmed(OptimizeRequest(items=[item('P100*100*4', 6184)], enable_splice_planning=False), settings()), settings())
+        plan_by_material(confirmed(legacy_request(items=[item('P100*100*4', 6184)], enable_splice_planning=False), settings()), settings())
 
 
 @pytest.mark.parametrize(('length', 'kerf', 'expected'), [(5970, 0, 'CUTTING_ALLOWANCE'), (5967, 3, 'CUTTING_ALLOWANCE'),
                                                        ('5966.999', 3, None), (6184, 0, 'STOCK_LENGTH_EXCEEDED')])
 def test_fixed_stock_kerf_and_strict_remnant_boundary(length, kerf, expected):
-    request = OptimizeRequest(items=[item('P100*100*4', length)], kerf=kerf)
+    request = legacy_request(items=[item('P100*100*4', length)], kerf=kerf)
     good, issues = assess_items(request.items, request.kerf, settings())
     assert (issues[0]['code'] if issues else None) == expected
     assert bool(good) == (expected is None)
@@ -202,7 +212,7 @@ def test_settings_admin_auth_atomic_save_and_new_lengths(monkeypatch):
     assert result.status_code == 200
     assert settings_module.load_settings().stock_lengths_by_type['H빔'] == [8000]
     assert settings_module.SETTINGS_PATH.exists()
-    request = OptimizeRequest(items=[item('H-300', 6184)], time_limit=1)
+    request = legacy_request(items=[item('H-300', 6184)], time_limit=1)
     plan = plan_by_material(request, settings_module.load_settings())
     assert plan['orders'][0]['stock_length'] == 8000
     assert plan['excluded'] == []
@@ -223,14 +233,14 @@ def test_preview_overflow_not_dropped_and_unsupported_not_guessed():
                        ['PLATE', 'A-3', 'SS275', 'PLT12', 2000, 1], ['합계', None, None, None, None, 4]])
     s = inspect_bom(data)['sheets'][0]
     response = client.post('/api/preview', files={'file': ('ts.xlsx', data)}, data={
-        'sheet': s['name'], 'header_row': 1, 'mapping': json.dumps(s['mapping']), 'enable_splice_planning': 'false'})
+        'sheet': s['name'], 'header_row': 1, 'mapping': json.dumps(s['mapping']), 'enable_splice_planning': 'false', 'planning_mode':'legacy'})
     parsed = response.json()
     assert response.status_code == 200
     assert len(parsed['items']) == 3
     assert [e['row'] for e in parsed['issues']] == [2, 4]
     assert [e['code'] for e in parsed['issues']] == ['STOCK_LENGTH_EXCEEDED', 'UNSUPPORTED_MATERIAL']
     assert parsed['eligible_rows'] == 1
-    result = client.post('/api/optimize', json={'items': parsed['items'], 'exclude_invalid': True, 'enable_splice_planning': False,
+    result = client.post('/api/optimize', json={'planning_mode':'legacy','objective':'bar_count','items': parsed['items'], 'exclude_invalid': True, 'enable_splice_planning': False,
                                               'exclusion_token': parsed['exclusion_token']})
     assert result.status_code == 200
     assert result.json()['summary']['excluded_piece_count'] == 3
@@ -244,7 +254,7 @@ def test_local_settings_without_password_and_cross_site_blocked():
 
 
 def test_stale_exclusion_consent_cannot_drop_newly_invalid_parts():
-    request = OptimizeRequest(items=[item('P100*100*4', 6184), item('H300*300*10*15', 11000), item('D19', 2000)], enable_splice_planning=False)
+    request = legacy_request(items=[item('P100*100*4', 6184), item('H300*300*10*15', 11000), item('D19', 2000)], enable_splice_planning=False)
     approved = confirmed(request, settings())
     changed = {**DEFAULT_STOCK_LENGTHS, 'H빔': [8000]}
     with pytest.raises(PlanningIssues) as caught:
@@ -254,6 +264,6 @@ def test_stale_exclusion_consent_cannot_drop_newly_invalid_parts():
 
 
 def test_client_cannot_spoof_material_classification():
-    response = client.post('/api/validate', json={'items': [item('PLT12', material_type='H빔')]})
+    response = client.post('/api/validate', json={'planning_mode':'legacy','items': [item('PLT12', material_type='H빔')]})
     assert response.status_code == 200
     assert response.json()['issues'][0]['code'] == 'UNSUPPORTED_MATERIAL'

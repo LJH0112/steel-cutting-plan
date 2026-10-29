@@ -47,7 +47,7 @@ def known_weight(item, basis):
         if not value.is_finite() or not 0 <= value <= 10**12:
             return None
         weight = Fraction(value)
-        return weight / item['quantity'] if basis == 'row_total' else weight
+        return weight / item.get('weight_basis_quantity',item['quantity']) if basis == 'row_total' else weight
     except (ValueError, InvalidOperation, ZeroDivisionError):
         return None
 
@@ -61,6 +61,10 @@ def exclusion_reason(issue):
     return '발주 길이 초과' if issue['code'] == 'STOCK_LENGTH_EXCEEDED' else issue['reason']
 
 
+def display_mark(item):
+    return '_'.join(v for v in (item.get('assembly_mark',''),item.get('title','')) if v)
+
+
 def build_report(plan):
     basis = plan['settings'].get('weight_basis', 'unspecified')
     pool = defaultdict(deque)
@@ -71,6 +75,7 @@ def build_report(plan):
                 'index': index, 'row': item.get('source_row') or index + 1,
                 'input_index': item.get('input_index') if item.get('input_index') is not None else index,
                 'title': item.get('title', ''),
+                'display_mark':display_mark(item),'required_inventory_id':item.get('required_inventory_id'),
                 'remaining': item['quantity'], 'weight': known_weight(item, basis),
                 'role': item.get('role', ''), 'assembly_length': item.get('assembly_length'),
                 'assembly_mark': item.get('assembly_mark', ''), 'sheet': item.get('source_sheet', ''),
@@ -87,7 +92,9 @@ def build_report(plan):
         p = {'number': number, 'id': pattern['id'], 'stock_length': pattern['stock_length'],
              'quantity': pattern['bar_count'], 'combined_length': pattern['parts_length'],
              'remnant': pattern['remnant'], 'utilization': rounded(100 * Fraction(units(pattern['parts_length']), units(pattern['stock_length'])), 2),
-             'kerf_loss': pattern['kerf_loss'], 'cuts': [], 'uncut': pattern.get('uncut', False)}
+             'kerf_loss': pattern['kerf_loss'], 'cuts': [], 'uncut': pattern.get('uncut', False),
+             'stock_source':pattern.get('stock_source','new'),'inventory_id':pattern.get('inventory_id'),
+             'approval_id':pattern.get('approval_id')}
         pattern_weights = []
         for cut in pattern['cuts']:
             count = cut['quantity'] * pattern['bar_count']
@@ -96,16 +103,20 @@ def build_report(plan):
             while remaining:
                 if not queue:
                     raise ValueError('출력 수량 검증 실패: BOM보다 많은 절단 부재가 있습니다.')
-                row = queue[0]
+                inventory_id=pattern.get('inventory_id')
+                row=next((r for r in queue if inventory_id and r['required_inventory_id']==inventory_id),None)
+                if row is None:row=next((r for r in queue if not r['required_inventory_id']),None)
+                if row is None:raise ValueError('연결재가 승인한 실재고에 배정되지 않았습니다.')
                 take = min(remaining, row['remaining'])
                 assigned.append({'source_index': row['index'], 'row': row['row'], 'title': row['title'],
                                  'input_index': row['input_index'],
                                  'assembly_mark': row['assembly_mark'], 'sheet': row['sheet'],
+                                 'display_mark':row['display_mark'],
                                  'quantity': take, 'role': row['role'], 'assembly_length': row['assembly_length']})
                 mass = None if row['weight'] is None else row['weight'] * take
                 pattern_weights.append(mass)
                 cut_weights.append(mass)
-                member = members.setdefault(row['title'], {'remarks': row['title'],
+                member = members.setdefault(row['display_mark'], {'remarks': row['display_mark'],
                     'total_quantity': 0, '_weights': [], 'allocations': []})
                 member['total_quantity'] += take
                 member['_weights'].append(mass)
@@ -116,7 +127,7 @@ def build_report(plan):
                 remaining -= take
                 row['remaining'] -= take
                 if row['remaining'] == 0:
-                    queue.popleft()
+                    queue.remove(row)
             for member in members.values():
                 member['total_weight'] = rounded(complete_sum(member.pop('_weights')))
             p['cuts'].append({'length': cut['length'], 'split_count': cut['quantity'],
@@ -124,7 +135,8 @@ def build_report(plan):
                               'members': list(members.values()), 'allocations': assigned})
             produced += count
         p['rows'] = list(combination_rows(p))
-        weights[(key[0], key[1], pattern['stock_length'])].append(complete_sum(pattern_weights))
+        if not pattern.get('inventory_id'):
+            weights[(key[0], key[1], pattern['stock_length'])].append(complete_sum(pattern_weights))
         group_weights[key].append(complete_sum(pattern_weights))
         group['patterns'].append(p)
     if any(queue for queue in pool.values()):
@@ -139,7 +151,7 @@ def build_report(plan):
         for pattern in group['patterns']:
             for row in pattern['rows']:
                 if (sum(a['quantity'] for a in row['allocations']) != row['total_quantity']
-                        or any(a['title'] != row['remarks'] for a in row['allocations'])):
+                        or any(a['display_mark'] != row['remarks'] for a in row['allocations'])):
                     raise ValueError('부재 번호별 출력 수량 검증 실패')
                 for allocation in row['allocations']:
                     displayed_quantity[allocation['input_index']] += allocation['quantity']
@@ -205,13 +217,17 @@ def build_report(plan):
         expected_length = units(item['length']) * qty
         if assembly:
             expected_length += units(assembly['allowance_per_joint']) * assembly['joint_count'] * qty
-        if (allocated_quantity[index], allocated_length[index]) != ((expected_pieces, expected_length) if included else (0, 0)):
+        expected=plan.get('expected_components',{}).get(index)
+        target=(expected['quantity'],expected['length']) if expected is not None else ((expected_pieces,expected_length) if included else (0,0))
+        if (allocated_quantity[index], allocated_length[index]) != target:
             raise ValueError(f"원본 {item.get('source_row') or index + 1}행의 제작 수량 또는 길이가 일치하지 않습니다.")
+        confirmed=item.get('confirmed_quantity',qty if included else 0)
+        pending=item.get('pending_quantity',0)
         reconciliation.append({'row': item.get('source_row') or index + 1, 'title': item.get('title', ''),
             'assembly_mark': item.get('assembly_mark', ''), 'sheet': item.get('source_sheet', ''),
             'material': item['material'], 'spec': item['spec'], 'required_quantity': qty,
-            'planned_quantity': qty if included else 0, 'excluded_quantity': 0 if included else qty,
-            'component_quantity': allocated_quantity[index], 'status': '이음 승인 대상' if assembly else '계산 포함' if included else '사용자 동의 제외'})
+            'planned_quantity': confirmed, 'excluded_quantity':qty-confirmed-pending,'pending_quantity':pending,
+            'component_quantity': allocated_quantity[index], 'status':'미확정 수량 있음' if pending else '이음 승인 대상' if assembly else '계산 포함' if included else '사용자 동의 제외'})
     excluded = [{**e, 'display_reason': exclusion_reason(e)} for e in plan.get('excluded', [])]
     part_marks = {}
     for row in reconciliation:
@@ -219,14 +235,13 @@ def build_report(plan):
             continue
         key = row['material'], row['spec'], row['title']
         member = part_marks.setdefault(key, {'material': key[0], 'spec': key[1], 'title': key[2],
-            'required_quantity': 0, 'planned_quantity': 0, 'excluded_quantity': 0, 'component_quantity': 0})
-        for field in ('required_quantity','planned_quantity','excluded_quantity','component_quantity'):
+            'required_quantity': 0, 'planned_quantity': 0, 'excluded_quantity': 0, 'component_quantity': 0,'pending_quantity':0})
+        for field in ('required_quantity','planned_quantity','excluded_quantity','component_quantity','pending_quantity'):
             member[field] += row[field]
     for member in part_marks.values():
-        if (member['required_quantity'] != member['planned_quantity'] + member['excluded_quantity']
-                or member['component_quantity'] != member['planned_quantity']):
+        if member['required_quantity'] != member['planned_quantity'] + member['excluded_quantity']+member['pending_quantity']:
             raise ValueError(f"Part Mark {member['title']}의 수량 검증 실패")
-        member['status'] = '일치' if not member['excluded_quantity'] else '예외 포함 일치 · 제외 내역 확인'
+        member['status'] = '미확정 포함 수량 일치' if member['pending_quantity'] else '일치' if not member['excluded_quantity'] else '예외 포함 일치 · 제외 내역 확인'
     return {'material_columns': [{'key': k, 'label': label} for k, label in MATERIAL_COLUMNS],
             'combination_columns': [{'key': k, 'label': label} for k, label in COMBINATION_COLUMNS],
             'material_layout': report_layout(MATERIAL_WIDTHS),
