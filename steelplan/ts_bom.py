@@ -76,7 +76,7 @@ def parse_ts_bom(wb, data, sheet, header_row, mapping):
         elif spec and not title and ass and not material:
             code, reason = 'ASSEMBLY_SUMMARY', '조립 요약행(Part Mark·Grade 없음): 절단 부재와 중복 집계 방지'
         elif spec and classify_material(spec) not in TS_BOM_MATERIAL_TYPES:
-            code, reason = 'OUTSIDE_PROFILE_SCOPE', 'PROFILE 대상 외: H빔·잔넬·C형강·환봉·T바만 최적화'
+            code, reason = 'OUTSIDE_PROFILE_SCOPE', 'PROFILE 대상 외: H빔·잔넬·C형강·환봉·T바·앵글만 최적화'
         if code:
             excluded.append({'sheet': SHEET, 'row': rownum, 'assembly_mark': ass, 'title': title,
                              'material': material, 'spec': spec, 'length': values['length'],

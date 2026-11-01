@@ -33,7 +33,7 @@
         <div id="dropzone" class="dropzone"><div class="upload-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true" style="vertical-align:middle"><path d="M12 16V4m-4 4 4-4 4 4M4 15v5h16v-5"/></svg></div><h3 id="file-title">엑셀 BOM 파일을 올려주세요</h3><p id="file-description">파일을 여기로 끌어오거나 아래 버튼으로 선택하세요</p><label for="file" class="button secondary small">파일 선택 <span>↗</span></label><input id="file" type="file" accept=".xls,.xlsx" hidden><small>.xls / .xlsx · 최대 10MB · 길이 단위 mm</small></div>
         <div class="import-footer"><span class="subtle-icon">▦</span> 재질 · 규격 · 길이 · 수량 열을 자동으로 인식합니다.<button id="sample" class="text-button">샘플로 시작하기 →</button><a href="/api/sample/ts" class="text-button">TS ASSEM LIST 샘플 ↓</a></div>
         <div id="mapping-panel" hidden>
-          <div class="mapping-top"><label>시트<select id="sheet" aria-label="BOM 시트"></select></label><label>헤더 행<input id="header-row" type="number" value="1" min="1" max="100"></label><button id="headers" class="button secondary small">열 다시 읽기</button></div><p class="field-hint">TS BOM LIST가 있으면 해당 시트와 실제 헤더만 사용하며 PROFILE·Part Mark 기준 대상 5종만 읽습니다. 다른 시트로 대체하지 않습니다.</p>
+          <div class="mapping-top"><label>시트<select id="sheet" aria-label="BOM 시트"></select></label><label>헤더 행<input id="header-row" type="number" value="1" min="1" max="100"></label><button id="headers" class="button secondary small">열 다시 읽기</button></div><p class="field-hint">TS BOM LIST가 있으면 해당 시트와 실제 헤더만 사용하며 PROFILE·Part Mark 기준 대상 6종(앵글 포함)만 읽습니다. 다른 시트로 대체하지 않습니다.</p>
           <div class="mapping-grid" id="mapping"></div><button id="preview" class="button secondary full">BOM 읽기 · 미리보기</button>
         </div>
       </section>

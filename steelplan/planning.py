@@ -24,7 +24,7 @@ def assess_items(items, kerf, settings, enable_splice_planning=False):
         if kind is None:
             code, reason = 'UNSUPPORTED_MATERIAL', '미지원 자재: DESCRIPTION 규격 형식을 확인해 주세요.'
         elif item.source_format == 'ts_bom' and kind not in TS_BOM_MATERIAL_TYPES:
-            code, reason = 'OUTSIDE_PROFILE_SCOPE', 'TS BOM LIST 대상 외 자재: H빔·잔넬·C형강·환봉·T바만 최적화'
+            code, reason = 'OUTSIDE_PROFILE_SCOPE', 'TS BOM LIST 대상 외 자재: H빔·잔넬·C형강·환봉·T바·앵글만 최적화'
         elif not allowed:
             code, reason = 'STOCK_LENGTH_UNCONFIGURED', f'{kind} 발주 길이 미설정: 관리자 설정에서 승인된 길이를 입력해 주세요.'
         elif enable_splice_planning and needs_splice(item):

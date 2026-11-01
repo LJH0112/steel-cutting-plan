@@ -433,6 +433,7 @@ function renderSettings(settings) {
     input.value = lengths.join(', ');
     if (kind === 'T바') input.placeholder = '승인된 발주 길이 입력 (기본값 없음)';
     if (kind === '각파이프') { input.readOnly = true; input.title = '6000mm 고정 · 초과 부재는 이음 제작 검토'; } input.setAttribute('aria-label', `${kind} 발주 길이`);
+    if (kind === '앵글') { input.readOnly = true; input.title = '10000mm 고정'; }
     label.append(input); $('stock-editors').append(label);
   }
 }

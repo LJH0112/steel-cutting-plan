@@ -83,8 +83,8 @@ def test_xls_only_reads_ts_bom_and_locks_real_columns(monkeypatch):
 def test_scope_summary_rows_and_original_identifiers_are_preserved():
     parsed = parsed_file()
     items = parsed['items']
-    assert sum(i['quantity'] for i in items) == 13  # No multiplication by assembly quantity.
-    assert {classify_material(i['spec']) for i in items} == {'H빔','잔넬','C형강','환봉','T바'}
+    assert sum(i['quantity'] for i in items) == 15  # Includes 2 angles, without multiplying assembly quantities.
+    assert {classify_material(i['spec']) for i in items} == {'H빔','잔넬','C형강','환봉','T바','앵글'}
     original = items[0]
     assert original['title'] == 'WBK3' and original['assembly_mark'] == 'B5'
     assert original['quantity'] == 2 and original['length'] == '397.0'
@@ -93,8 +93,9 @@ def test_scope_summary_rows_and_original_identifiers_are_preserved():
     assert original['source_cells']['material'] == '  SS275   '
     assert 'B5-WBK3' in {i['title'] for i in items}  # A literal source ID stays literal.
     reasons = Counter(e['code'] for e in parsed['import_audit']['exclusions'])
-    assert reasons == {'SHEET_NOT_SELECTED':1, 'ASSEMBLY_SUMMARY':1, 'OUTSIDE_PROFILE_SCOPE':4, 'SUBTOTAL':2}
-    assert not any(i['title'] in ('P-01','L-01','PL-01') for i in items)
+    assert reasons == {'SHEET_NOT_SELECTED':1, 'ASSEMBLY_SUMMARY':1, 'OUTSIDE_PROFILE_SCOPE':3, 'SUBTOTAL':2}
+    assert next(i for i in items if i['title']=='L-01')['quantity'] == 2
+    assert not any(i['title'] in ('P-01','PL-01') for i in items)
 
 
 @pytest.mark.parametrize(('spec', 'expected'), [('T100*50*5','T바'),('T100*50*5*7','T바'),
@@ -138,7 +139,7 @@ def test_member_totals_exports_and_original_cells_match_after_xls_import(tmp_pat
             for r in pattern['rows']:
                 actual[g['material'],g['spec'],r['remarks']] += r['total_quantity']
     assert actual == expected
-    assert p['summary']['piece_count'] == 13
+    assert p['summary']['piece_count'] == 15
     assert all(r['required_quantity'] == r['planned_quantity'] for r in p['report']['part_mark_reconciliation'])
     wb = load_workbook(io.BytesIO(export_xlsx(p)))
     assert '가져오기 제외' in wb and '원본 셀 추적' in wb and 'Part Mark 수량 검증' in wb

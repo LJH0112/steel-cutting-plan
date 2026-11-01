@@ -177,4 +177,6 @@ class StockSettings(BaseModel):
             result[name] = parsed
         if result['각파이프'] != [Decimal('6000')]:
             raise ValueError('각파이프 발주 길이는 6000mm 고정입니다. 긴 부재는 이음 제작 검토 대상으로 처리합니다.')
+        if result['앵글'] != [Decimal('10000')]:
+            raise ValueError('앵글 발주 길이는 10000mm 고정입니다.')
         return result
