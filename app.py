@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from steelplan.bom import MAX_UPLOAD, inspect_bom, parse_bom, read_headers
-from steelplan.exports import export_pdf, export_xlsx, sample_xlsx
+from steelplan.exports import export_pdf, export_pdf_zip, export_xlsx, sample_xlsx
 from steelplan.models import OptimizeRequest, StockSettings
 from steelplan.planning import PlanningIssues, plan_by_material, validate_plan_input
 from steelplan.settings import load_settings, save_settings
@@ -186,8 +186,9 @@ def calculate(request: OptimizeRequest):
 @app.get('/api/results/{job_id}.{format}')
 def download(job_id: str, format: str, paper_size: Literal['A4', 'A3'] = 'A4',
              orientation: Literal['portrait', 'landscape'] = 'portrait',
-             section: Literal['all', 'materials', 'combinations'] = 'all'):
-    if format not in ('xlsx', 'pdf'):
+             section: Literal['all', 'materials', 'combinations','bk_materials','bk_combinations','girder_materials','girder_combinations'] = 'all',
+             layout: Literal['split','combined'] = 'split'):
+    if format not in ('xlsx', 'pdf','pdfzip'):
         raise HTTPException(404, '지원하지 않는 출력 형식입니다.')
     with RESULT_LOCK:
         saved = RESULTS.get(job_id)
@@ -195,8 +196,9 @@ def download(job_id: str, format: str, paper_size: Literal['A4', 'A3'] = 'A4',
             RESULTS.pop(job_id, None)
             raise HTTPException(404, '결과가 만료되었거나 서버가 재시작되었습니다. 다시 계산해 주세요.')
         plan = saved[1]
-    content = export_xlsx(plan, paper_size, orientation) if format == 'xlsx' else export_pdf(plan, paper_size, orientation, section)
-    mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' if format == 'xlsx' else 'application/pdf'
+    content = export_xlsx(plan,paper_size,orientation,layout) if format=='xlsx' else export_pdf_zip(plan,paper_size,orientation) if format=='pdfzip' else export_pdf(plan,paper_size,orientation,section)
+    mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' if format=='xlsx' else 'application/zip' if format=='pdfzip' else 'application/pdf'
     filename = ('CP_' + section) if format == 'pdf' and section != 'all' else 'steel_cutting_plan'
-    return Response(content, media_type=mime, headers={'Content-Disposition': f'attachment; filename="{filename}.{format}"',
+    extension='zip' if format=='pdfzip' else format
+    return Response(content, media_type=mime, headers={'Content-Disposition': f'attachment; filename="{filename}.{extension}"',
                                                        'Cache-Control': 'no-store'})

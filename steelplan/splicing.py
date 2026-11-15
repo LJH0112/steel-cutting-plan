@@ -10,6 +10,7 @@ from decimal import Decimal
 from .materials import classify_material
 from .models import BOMItem
 from .optimizer import MIN_REMAINDER, mm, optimize, units
+from .member_groups import GENERAL, member_group
 
 
 def needs_splice(item):
@@ -120,7 +121,7 @@ def optimize_with_splices(request, settings):
     # Recombine identical physical cutting patterns, preserving procurement counts.
     merged = {}
     for p in kept:
-        key = (p['material'], p['spec'], p['stock_length'], bool(p.get('uncut')),
+        key = (p.get('cutting_group',GENERAL),p['material'], p['spec'], p['stock_length'], bool(p.get('uncut')),
                tuple((c['length'], c['quantity']) for c in p['cuts']))
         if key in merged:
             merged[key]['bar_count'] += p['bar_count']
@@ -142,9 +143,9 @@ def optimize_with_splices(request, settings):
                 record['pattern_id'] = p['id']
         qty = p['bar_count']
         stock_total += stock * qty; parts_total += parts * qty; kerf_total += loss * qty; rem_total += remnant * qty
-        key = p['material'], p['spec'], p['stock_length']
-        order = orders.setdefault(key, {'material': key[0], 'spec': key[1], 'material_type': p['material_type'],
-                                       'stock_length': key[2], 'quantity': 0, 'total_length': 0,
+        key = p.get('cutting_group',GENERAL),p['material'], p['spec'], p['stock_length']
+        order = orders.setdefault(key, {'cutting_group':key[0],'material': key[1], 'spec': key[2], 'material_type': p['material_type'],
+                                       'stock_length': key[3], 'quantity': 0, 'total_length': 0,
                                        'parts_length': 0, 'kerf_loss': 0, 'remnant': 0})
         order['quantity'] += qty
         for field, value in [('total_length', stock), ('parts_length', parts), ('kerf_loss', loss), ('remnant', remnant)]:
@@ -160,7 +161,7 @@ def optimize_with_splices(request, settings):
     plan.update(patterns=patterns, orders=list(orders.values()), cut_bom=cut_bom, splices=assemblies, remnant_reuse=reused)
     plan['summary'] = {'bar_count': sum(o['quantity'] for o in orders.values()),
                        'piece_count': sum(i.quantity for i in request.items), 'cut_piece_count': sum(i['quantity'] for i in cut_bom),
-                       'group_count': len({(i.material, i.spec) for i in request.items}),
+                       'group_count': len({(member_group(i),i.material, i.spec) for i in request.items}),
                        'total_stock_length': mm(stock_total), 'total_parts_length': mm(parts_total),
                        'total_kerf_loss': mm(kerf_total), 'total_remnant': mm(rem_total),
                        'finished_parts_length': mm(finished), 'total_splice_allowance': mm(joint_extra),
@@ -174,9 +175,9 @@ def optimize_with_splices(request, settings):
     plan['settings'].update(time_limit=request.time_limit, splice_allowance=float(allowance),
                             reusable_remnant_min=float(request.reusable_remnant_min),
                             splice_details_approved=request.splice_details_approved)
-    existing = {(s['material'], s['spec']): s for s in plan['statuses']}
+    existing = {(s.get('cutting_group',GENERAL),s['material'], s['spec']): s for s in plan['statuses']}
     for item in joined:
-        existing[item.material, item.spec] = {'material': item.material, 'spec': item.spec, 'material_type': '각파이프',
+        existing[member_group(item),item.material, item.spec] = {'material': item.material, 'spec': item.spec, 'material_type': '각파이프','cutting_group':member_group(item),
             'status': 'FEASIBLE', 'detail': '이음 검토 계획: 잔재 우선 배정 후 부족 연결재 최적화 (전체 최적성 미확정)'}
     plan['statuses'] = list(existing.values())
     return plan

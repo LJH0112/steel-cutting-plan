@@ -3,9 +3,10 @@ from datetime import date, datetime, timedelta, timezone
 import re
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationInfo, field_validator, model_validator, computed_field
 
 from .materials import DEFAULT_STOCK_LENGTHS, compact
+from .member_groups import member_group
 
 
 def millimeters(value) -> Decimal:
@@ -38,6 +39,11 @@ class BOMItem(BaseModel):
     required_inventory_id: str | None = Field(default=None, max_length=100)
     source_cells: dict[Literal['material', 'spec', 'title', 'assembly_mark', 'length', 'quantity'],
                        Annotated[str, StringConstraints(max_length=500, strip_whitespace=False)]] = Field(default_factory=dict)
+
+    @computed_field
+    @property
+    def cutting_group(self) -> Literal['GENERAL', 'BK']:
+        return member_group(self)
 
     @field_validator('material', 'spec', mode='before')
     @classmethod
@@ -88,6 +94,7 @@ class RemnantStock(BaseModel):
     length: Decimal = Field(gt=0, le=100000)
     quantity: int = Field(gt=0, le=5000, strict=True)
     confirmed: bool = Field(default=False, strict=True)
+    cutting_group: Literal['GENERAL', 'BK'] = 'GENERAL'
 
     @field_validator('length', mode='before')
     @classmethod

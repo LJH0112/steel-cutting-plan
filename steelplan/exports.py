@@ -1,5 +1,6 @@
 """Print the shared report tables without changing the calculation engine."""
 import io
+import zipfile
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -141,12 +142,27 @@ def notes_text(plan):
                '비교안별 확정/미확정 수량을 함께 확인. 승인 예외 외 실제 절단 잔재 >30mm.' if plan.get('manufacturing') else ''))
 
 
-def export_xlsx(plan, paper_size='A4', orientation='portrait'):
-    paper(paper_size)
-    report = plan.get('report') or build_report(plan)
-    wb = Workbook(); wb.remove(wb.active)
+def partition_view(plan, partition):
+    report=plan.get('report') or build_report(plan)
+    label='BK' if partition=='BK' else '거더'
+    stats=next((r for r in report['cutting_group_summaries'] if r['cutting_group']==partition),{})
+    view={**report,**report['partition_reports'][partition],'has_bk':False}
+    view['output_piece_count']=sum(c['total_quantity'] for g in view['combination_groups'] for p in g['patterns'] for c in p['cuts'])
+    selected={**plan,'report':view,'summary':{**plan['summary'],
+        'bar_count':stats.get('bar_count',0),'total_new_stock_length':stats.get('new_stock_length',0),
+        'total_stock_length':stats.get('new_stock_length',0),'loss_rate':stats.get('loss_rate',0),
+        'input_piece_count':stats.get('required_quantity',0),'piece_count':stats.get('confirmed_quantity',0),
+        'pending_piece_count':stats.get('pending_quantity',0),'excluded_piece_count':stats.get('excluded_quantity',0)}}
+    meta={**plan.get('report_metadata',{})}
+    meta['project_section']=' / '.join(v for v in (meta.get('project_section',''),label) if v)
+    selected['report_metadata']=meta
+    selected['pending']=[r for r in plan.get('pending',[]) if r.get('cutting_group','GENERAL')==partition]
+    return selected,view
+
+
+def _write_form_sheets(wb, plan, report, paper_size, orientation, material_title, combo_title):
     meta = plan.get('report_metadata', {})
-    ws = styled_sheet(wb, '원자재 리스트', [label for _, label in MATERIAL_COLUMNS],
+    ws = styled_sheet(wb, material_title, [label for _, label in MATERIAL_COLUMNS],
                       [[row[key] for key, _ in MATERIAL_COLUMNS] for row in report['material_display_rows']],
                       excel_widths(MATERIAL_WIDTHS, paper_size, orientation), paper_size, orientation, '원자재 물량 집계표', meta)
     for index, row in enumerate(report['material_display_rows'], 5):
@@ -155,7 +171,11 @@ def export_xlsx(plan, paper_size='A4', orientation='portrait'):
                 cell.font = Font(name='맑은 고딕', bold=True, size=REPORT_FONT_SIZE)
                 cell.fill = PatternFill('solid', fgColor='FFFF00')
                 cell.border = Border(top=Side(style='thin'), bottom=Side(style='thin'), left=Side(style='thin'), right=Side(style='thin'))
-            report_cell(ws.cell(index, 2), horizontal='center')
+            if row['kind']=='section_header':
+                ws.merge_cells(start_row=index,start_column=1,end_row=index,end_column=10)
+                report_cell(ws.cell(index,1),horizontal='left')
+            else:
+                report_cell(ws.cell(index, 2), horizontal='center')
     ws.append([summary_text(plan, report)])
     ws.merge_cells(start_row=ws.max_row, start_column=1, end_row=ws.max_row, end_column=10)
     ws.row_dimensions[ws.max_row].height = 32
@@ -164,12 +184,22 @@ def export_xlsx(plan, paper_size='A4', orientation='portrait'):
     ws.merge_cells(start_row=ws.max_row, start_column=1, end_row=ws.max_row, end_column=10)
     ws.row_dimensions[ws.max_row].height = 45
     ws.cell(ws.max_row, 1).alignment = Alignment(wrap_text=True)
-    combo = styled_sheet(wb, '조합 리스트', [label for _, label in COMBINATION_COLUMNS], [],
+    combo = styled_sheet(wb, combo_title, [label for _, label in COMBINATION_COLUMNS], [],
                          excel_widths(COMBINATION_WIDTHS, paper_size, orientation), paper_size, orientation, '조합 리스트', meta)
+    previous_partition=None
     for group in report['combination_groups']:
+        if report['has_bk'] and group['cutting_group']!=previous_partition:
+            combo.append(['BK 전용 구역' if group['cutting_group']=='BK' else '일반 부재'])
+            section_row=combo.max_row
+            combo.merge_cells(start_row=section_row,start_column=1,end_row=section_row,end_column=11)
+            combo.row_dimensions[section_row].height=REPORT_ROW_HEIGHT
+            report_cell(combo.cell(section_row,1))
+            for cell in combo[section_row]:cell.fill=PatternFill('solid',fgColor='FFFF00')
+            previous_partition=group['cutting_group']
         sources=' / '.join(f"{p['number']}={p['inventory_id']}" for p in group['patterns'] if p.get('inventory_id'))
         approved=', '.join(str(p['number']) for p in group['patterns'] if p.get('approval_id'))
-        combo.append([f"[재질] {group['material']}   [규격] {group['spec']}   [단위중량]"+('   [재고 패턴] '+sources if sources else '')+('   [승인 패턴] '+approved if approved else '')])
+        pending=f"   [미확정] {group['pending_quantity']}개" if group.get('pending_quantity') else ''
+        combo.append([f"[재질] {group['material']}   [규격] {group['spec']}   [단위중량]"+('   [재고 패턴] '+sources if sources else '')+('   [승인 패턴] '+approved if approved else '')+pending])
         group_row = combo.max_row
         combo.merge_cells(start_row=group_row, start_column=1, end_row=group_row, end_column=11)
         combo.cell(group_row, 1).fill = PatternFill('solid', fgColor='FFFFFF')
@@ -204,6 +234,22 @@ def export_xlsx(plan, paper_size='A4', orientation='portrait'):
             cell.fill=PatternFill('solid',fgColor='FFFF00')
             cell.border=Border(top=Side(style='thin'),bottom=Side(style='thin'),left=Side(style='thin'),right=Side(style='thin'))
     combo.auto_filter.ref = f'A4:K{combo.max_row}'
+    return ws,combo
+
+
+def export_xlsx(plan, paper_size='A4', orientation='portrait', layout='combined'):
+    paper(paper_size)
+    report = plan.get('report') or build_report(plan)
+    wb = Workbook(); wb.remove(wb.active)
+    if layout not in ('combined','split'):
+        raise ValueError('출력 구성이 올바르지 않습니다.')
+    if layout=='combined':
+        _write_form_sheets(wb,plan,report,paper_size,orientation,'원자재 리스트','조합 리스트')
+    else:
+        for partition,label in [('BK','BK'),('GENERAL','거더')]:
+            selected,view=partition_view(plan,partition)
+            _write_form_sheets(wb,selected,view,paper_size,orientation,label+' 원자재',label+' 조합')
+        wb._sheets=[wb[name] for name in ['BK 조합','BK 원자재','거더 조합','거더 원자재']]
     styled_sheet(wb, 'BOM', ['재질', '규격', '길이 (mm)', '수량', '자재 종류', '원본 행', '부재 번호 (TITLE)',
                             '부재 분류 (ITEM)', 'WEIGHT.KG', 'PAINT.M', '계산 여부'],
                  [[i['material'], i['spec'], float(i['length']), i['quantity'], i.get('material_type', ''),
@@ -275,6 +321,10 @@ def export_xlsx(plan, paper_size='A4', orientation='portrait'):
             [24,18,32,22,18,18,22,22,22,18],paper_size,orientation)
         wb['계산 설정'].append(['운송 원자재 길이 상한',plan['manufacturing']['transport_max_length'] or '추가 상한 미입력'])
         wb['계산 설정'].append(['가공 원자재 길이 상한',plan['manufacturing']['processing_max_length'] or '추가 상한 미입력'])
+    if report['has_bk']:
+        styled_sheet(wb,'BK 분리 집계',['구분','발주 본수','신규 발주 총길이','조합길이','잔철','총 로스율 %','BOM 수량','확정 수량','미확정 수량','제외 수량'],
+            [[r[k]for k in ('label','bar_count','new_stock_length','combined_length','remnant','loss_rate','required_quantity','confirmed_quantity','pending_quantity','excluded_quantity')]
+             for r in report['cutting_group_summaries']], [24,18,24,22,22,18,18,18,18,18],paper_size,orientation)
     for sheet in wb:
         sheet.page_setup.orientation=orientation
     output = io.BytesIO(); wb.save(output)
@@ -285,7 +335,22 @@ def export_pdf(plan, paper_size='A4', orientation='portrait', section='all'):
     from .pdf_report import render_pdf
     paper(paper_size)
     report = plan.get('report') or build_report(plan)
+    split={'bk_materials':('BK','materials'),'bk_combinations':('BK','combinations'),
+           'girder_materials':('GENERAL','materials'),'girder_combinations':('GENERAL','combinations')}
+    if section in split:
+        partition,section=split[section]
+        plan,report=partition_view(plan,partition)
+        return render_pdf(plan,report,summary_text(plan,report),notes_text(plan),paper_size,orientation,section,include_audit=False,include_pending=True)
     return render_pdf(plan, report, summary_text(plan, report), notes_text(plan), paper_size, orientation, section)
+
+
+def export_pdf_zip(plan,paper_size='A4',orientation='portrait'):
+    output=io.BytesIO()
+    with zipfile.ZipFile(output,'w',compression=zipfile.ZIP_DEFLATED) as archive:
+        for section,name in [('bk_combinations','BK 조합'),('bk_materials','BK 원자재'),
+                             ('girder_combinations','거더 조합'),('girder_materials','거더 원자재')]:
+            archive.writestr(name+'.pdf',export_pdf(plan,paper_size,orientation,section))
+    return output.getvalue()
 
 
 def sample_xlsx():

@@ -9,6 +9,7 @@ from ortools.sat.python import cp_model
 
 from .models import OptimizeRequest
 from .materials import classify_material
+from .member_groups import member_group, group_order
 
 SCALE = 1000  # 0.001 mm; a 30.000 mm remainder is forbidden.
 MIN_REMAINDER = 30 * SCALE + 1
@@ -156,7 +157,7 @@ def optimize(request: OptimizeRequest, stock_lengths_by_type=None, inventory=(),
         raise ValueError('총 부재 수량은 5,000개 이하여야 합니다.')
     grouped = defaultdict(Counter)
     for item in request.items:
-        grouped[(item.material, item.spec)][units(item.length)] += item.quantity
+        grouped[(member_group(item), item.material, item.spec)][units(item.length)] += item.quantity
     if len(grouped) > 100:
         raise ValueError('재질·규격 그룹은 최대 100개까지 지원합니다.')
     if stock_lengths_by_type is None and request.stock_lengths is None:
@@ -167,25 +168,25 @@ def optimize(request: OptimizeRequest, stock_lengths_by_type=None, inventory=(),
         values = stock_lengths_by_type[classify_material(spec)] if stock_lengths_by_type is not None else request.stock_lengths
         return [units(s) for s in values]
 
-    for (material, spec), demand in grouped.items():
+    for (partition, material, spec), demand in grouped.items():
         stocks = group_stocks(spec)
-        possible = stocks+[units(r.length) for r in inventory if r.confirmed and (r.material,r.spec)==(material,spec)]
+        possible = stocks+[units(r.length) for r in inventory if r.confirmed and (r.cutting_group,r.material,r.spec)==(partition,material,spec)]
         for length in demand:
             if not possible or length+kerf+minimum_remnant > max(possible):
                 raise ValueError(f'{material} / {spec}: {mm(length):g}mm 부재는 발주 길이에 들어가지 않습니다. '
                                  '절단 손실과 30mm 초과 잔재를 고려해 더 긴 발주 길이를 지정해 주세요.')
     orders, patterns, statuses = [], [], []
     total_stock = total_parts = total_kerf = total_remnant = inventory_total = inventory_count = 0
-    for index, ((material, spec), demand) in enumerate(sorted(grouped.items())):
+    for index, ((partition, material, spec), demand) in enumerate(sorted(grouped.items(),key=lambda entry:(group_order(entry[0][0]),*entry[0][1:]))):
         stocks = group_stocks(spec)
         kind = classify_material(spec) or '미지원 자재'
         lengths = sorted(demand, reverse=True)
         demands = [demand[v] for v in lengths]
         group_inventory = [{'id':r.id,'length':units(r.length),'quantity':r.quantity} for r in inventory
-                           if r.confirmed and (r.material,r.spec)==(material,spec)]
+                           if r.confirmed and (r.cutting_group,r.material,r.spec)==(partition,material,spec)]
         reservations = Counter()
         for item in request.items:
-            if (item.material,item.spec)==(material,spec) and item.required_inventory_id:
+            if (member_group(item),item.material,item.spec)==(partition,material,spec) and item.required_inventory_id:
                 reservations[item.required_inventory_id,lengths.index(units(item.length))] += item.quantity
         remaining = max(0, request.time_limit - (time.monotonic() - started))
         allowance = remaining / (len(grouped) - index)
@@ -195,7 +196,7 @@ def optimize(request: OptimizeRequest, stock_lengths_by_type=None, inventory=(),
         actual = [sum(bar['counts'][i] for bar in bars) for i in range(len(lengths))]
         if actual != demands:
             raise RuntimeError('부재 수량 검증 실패')
-        statuses.append({'material': material, 'spec': spec, 'material_type': kind,
+        statuses.append({'material': material, 'spec': spec, 'material_type': kind, 'cutting_group':partition,
                          'allowed_lengths': [mm(s) for s in stocks], 'status': status, 'detail': detail})
         for (inventory_id,i),qty in reservations.items():
             if sum(b['counts'][i] for b in bars if b.get('inventory_id')==inventory_id)<qty:
@@ -214,6 +215,7 @@ def optimize(request: OptimizeRequest, stock_lengths_by_type=None, inventory=(),
             if remnant < minimum_remnant or (allowed_inventory.get(inventory_id)!=stock if inventory_id else stock not in stocks):
                 raise RuntimeError('잔재 또는 발주 길이 검증 실패')
             patterns.append({'id': f'CP-{len(patterns) + 1:03d}', 'material': material, 'spec': spec, 'material_type': kind,
+                             'cutting_group':partition,
                              'stock_length': mm(stock), 'bar_count': repeats,
                              'stock_source':'inventory' if inventory_id else 'new', 'inventory_id':inventory_id or None,
                              'cuts': [{'length': mm(l), 'quantity': q} for l, q in zip(lengths, counts) if q],
@@ -232,6 +234,7 @@ def optimize(request: OptimizeRequest, stock_lengths_by_type=None, inventory=(),
             total_remnant += remnant * repeats
         for stock, row in sorted(by_stock.items()):
             orders.append({'material': material, 'spec': spec, 'material_type': kind, 'stock_length': mm(stock),
+                           'cutting_group':partition,
                            'quantity': row['quantity'], 'total_length': mm(stock * row['quantity']),
                            'parts_length': mm(row['parts_length']), 'kerf_loss': mm(row['kerf_loss']),
                            'remnant': mm(row['remnant']),

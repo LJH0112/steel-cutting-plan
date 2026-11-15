@@ -4,6 +4,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from fractions import Fraction
 
 from .optimizer import units
+from .member_groups import member_group, GENERAL, BK, GROUP_LABELS, group_order
 
 MATERIAL_COLUMNS = [
     ('material', '재질'), ('spec', '규격'), ('length', '길이'), ('quantity', '수량'),
@@ -71,7 +72,7 @@ def build_report(plan):
     source = plan.get('cut_bom', plan['bom'])
     for index, item in enumerate(source):
         if item.get('included', True):
-            pool[(item['material'], item['spec'], units(item['length']))].append({
+            pool[(member_group(item), item['material'], item['spec'], units(item['length']))].append({
                 'index': index, 'row': item.get('source_row') or index + 1,
                 'input_index': item.get('input_index') if item.get('input_index') is not None else index,
                 'title': item.get('title', ''),
@@ -86,20 +87,20 @@ def build_report(plan):
     allocated_quantity, allocated_length = Counter(), Counter()
     group_weights = defaultdict(list)
     for number, pattern in enumerate(plan['patterns'], 1):
-        key = pattern['material'], pattern['spec']
-        group = groups.setdefault(key, {'material': key[0], 'spec': key[1],
+        key = pattern.get('cutting_group',GENERAL), pattern['material'], pattern['spec']
+        group = groups.setdefault(key, {'cutting_group':key[0], 'material': key[1], 'spec': key[2],
                                        'material_type': pattern['material_type'], 'patterns': []})
         p = {'number': number, 'id': pattern['id'], 'stock_length': pattern['stock_length'],
              'quantity': pattern['bar_count'], 'combined_length': pattern['parts_length'],
              'remnant': pattern['remnant'], 'utilization': rounded(100 * Fraction(units(pattern['parts_length']), units(pattern['stock_length'])), 2),
              'kerf_loss': pattern['kerf_loss'], 'cuts': [], 'uncut': pattern.get('uncut', False),
              'stock_source':pattern.get('stock_source','new'),'inventory_id':pattern.get('inventory_id'),
-             'approval_id':pattern.get('approval_id')}
+             'approval_id':pattern.get('approval_id'),'cutting_group':key[0]}
         pattern_weights = []
         for cut in pattern['cuts']:
             count = cut['quantity'] * pattern['bar_count']
             remaining, assigned, cut_weights, members = count, [], [], {}
-            queue = pool[(key[0], key[1], units(cut['length']))]
+            queue = pool[(*key, units(cut['length']))]
             while remaining:
                 if not queue:
                     raise ValueError('출력 수량 검증 실패: BOM보다 많은 절단 부재가 있습니다.')
@@ -111,7 +112,7 @@ def build_report(plan):
                 assigned.append({'source_index': row['index'], 'row': row['row'], 'title': row['title'],
                                  'input_index': row['input_index'],
                                  'assembly_mark': row['assembly_mark'], 'sheet': row['sheet'],
-                                 'display_mark':row['display_mark'],
+                                 'display_mark':row['display_mark'],'cutting_group':key[0],
                                  'quantity': take, 'role': row['role'], 'assembly_length': row['assembly_length']})
                 mass = None if row['weight'] is None else row['weight'] * take
                 pattern_weights.append(mass)
@@ -136,7 +137,7 @@ def build_report(plan):
             produced += count
         p['rows'] = list(combination_rows(p))
         if not pattern.get('inventory_id'):
-            weights[(key[0], key[1], pattern['stock_length'])].append(complete_sum(pattern_weights))
+            weights[(*key, pattern['stock_length'])].append(complete_sum(pattern_weights))
         group_weights[key].append(complete_sum(pattern_weights))
         group['patterns'].append(p)
     if any(queue for queue in pool.values()):
@@ -161,13 +162,15 @@ def build_report(plan):
     rows = []
     by_spec = defaultdict(list)
     for order in plan['orders']:
-        mass = complete_sum(weights[(order['material'], order['spec'], order['stock_length'])])
+        partition=order.get('cutting_group',GENERAL)
+        mass = complete_sum(weights[(partition,order['material'], order['spec'], order['stock_length'])])
         row = {'kind': 'detail', 'material': order['material'], 'spec': order['spec'],
+               'cutting_group':partition,
                'length': order['stock_length'], 'quantity': order['quantity'], 'total_weight': None,
                'combined_length': order['parts_length'], 'combined_weight': rounded(mass),
                'remnant': order['remnant'], 'utilization': rounded(100 * Fraction(units(order['parts_length']), units(order['total_length'])), 2),
                'stock_total': order['total_length'], '_mass': mass, 'remarks': ''}
-        by_spec[(row['material'], row['spec'])].append(row)
+        by_spec[(partition,row['material'], row['spec'])].append(row)
 
     def total(details, material, spec, kind):
         stock = sum(units(d['stock_total']) for d in details)
@@ -178,13 +181,38 @@ def build_report(plan):
                 'remnant': rounded(sum(Decimal(str(d['remnant'])) for d in details)),
                 'utilization': rounded(100 * Fraction(parts, stock), 2) if stock else 0, 'remarks': ''}
 
+    has_bk=any(member_group(i)==BK for i in plan['bom'])
+    if has_bk:
+        # Keep the BK section visible even when every BK part needs approval.
+        for item in plan['bom']:
+            if member_group(item)==BK:
+                key=(BK,item['material'],item['spec'])
+                groups.setdefault(key,{'cutting_group':BK,'material':key[1],'spec':key[2],
+                    'material_type':item.get('material_type',''),'patterns':[]})
     details = []
-    for (material, spec), group_rows in sorted(by_spec.items()):
-        rows.extend(sorted(group_rows, key=lambda r: r['length']))
-        rows.append(total(group_rows, material, spec + ' 소계', 'subtotal'))
-        details.extend(group_rows)
+    material_partitions={}
+    for partition in (GENERAL,BK):
+        sections=[(key,values) for key,values in sorted(by_spec.items()) if key[0]==partition]
+        section_rows=[]
+        section_details=[]
+        for (_,material,spec),group_rows in sections:
+            section_rows.extend(sorted(group_rows,key=lambda r:r['length']))
+            subtotal=total(group_rows,material,spec+' 소계','subtotal')
+            section_rows.append({**subtotal,'cutting_group':partition})
+            section_details.extend(group_rows)
+        material_partitions[partition]=section_rows+[{**total(section_details,'전체 합계','','grand_total'),'cutting_group':partition}]
+        if not sections and not (has_bk and any(member_group(i)==partition for i in plan['bom'])):continue
+        if has_bk:
+            row={key:None for key,_ in MATERIAL_COLUMNS}
+            rows.append({**row,'kind':'section_header','material':GROUP_LABELS[partition],
+                         'cutting_group':partition})
+        rows.extend(section_rows)
+        details.extend(section_details)
+        if has_bk:
+            section_total=total(section_details,'','BK 합계' if partition==BK else '일반 합계','group_total')
+            rows.append({**section_total,'cutting_group':partition})
     rows.append(total(details, '전체 합계', '', 'grand_total'))
-    for row in rows:
+    for row in [*rows,*[r for rs in material_partitions.values() for r in rs]]:
         row.pop('_mass', None)
     for key, group in groups.items():
         bars = sum(p['quantity'] for p in group['patterns'])
@@ -194,20 +222,25 @@ def build_report(plan):
         group['total'] = {'number': '합 계', 'stock_length': stock / 1000, 'quantity': bars,
                           'combined_length': combined / 1000,
                           'remnant': sum(units(p['remnant']) * p['quantity'] for p in group['patterns']) / 1000,
-                          'utilization': rounded(100 * Fraction(combined, stock), 2), 'length': None,
+                          'utilization': rounded(100 * Fraction(combined, stock), 2) if stock else 0, 'length': None,
                           'split_count': None, 'total_quantity': sum(c['total_quantity'] for p in group['patterns'] for c in p['cuts']),
                           'total_weight': rounded(complete_sum(group_weights[key])), 'remarks': ''}
-    display_rows = []
-    for row in rows:
+        group['pending_quantity']=sum(i.get('pending_quantity',0) for i in plan['bom']
+            if (member_group(i),i['material'],i['spec'])==key) if has_bk and key[0]==BK else 0
+
+    def display_row(row):
         display = dict(row)
         if row['kind'] == 'detail':
             for key in ('total_weight', 'combined_length', 'combined_weight', 'remnant', 'utilization'):
                 display[key] = None
         elif row['kind'] == 'subtotal':
             display['material'], display['spec'] = '', '소 계'
+        elif row['kind'] in ('section_header','group_total'):
+            pass
         else:
             display['material'], display['spec'] = '', '합 계'
-        display_rows.append(display)
+        return display
+    display_rows = [display_row(row) for row in rows]
     assemblies = {a['input_index']: a for a in plan.get('splices', [])}
     reconciliation = []
     for index, item in enumerate(plan['bom']):
@@ -224,6 +257,7 @@ def build_report(plan):
         confirmed=item.get('confirmed_quantity',qty if included else 0)
         pending=item.get('pending_quantity',0)
         reconciliation.append({'row': item.get('source_row') or index + 1, 'title': item.get('title', ''),
+            'cutting_group':member_group(item),
             'assembly_mark': item.get('assembly_mark', ''), 'sheet': item.get('source_sheet', ''),
             'material': item['material'], 'spec': item['spec'], 'required_quantity': qty,
             'planned_quantity': confirmed, 'excluded_quantity':qty-confirmed-pending,'pending_quantity':pending,
@@ -233,8 +267,8 @@ def build_report(plan):
     for row in reconciliation:
         if row['sheet'] != 'TS BOM LIST':
             continue
-        key = row['material'], row['spec'], row['title']
-        member = part_marks.setdefault(key, {'material': key[0], 'spec': key[1], 'title': key[2],
+        key = row['cutting_group'],row['material'], row['spec'], row['title']
+        member = part_marks.setdefault(key, {'cutting_group':key[0],'material': key[1], 'spec': key[2], 'title': key[3],
             'required_quantity': 0, 'planned_quantity': 0, 'excluded_quantity': 0, 'component_quantity': 0,'pending_quantity':0})
         for field in ('required_quantity','planned_quantity','excluded_quantity','component_quantity','pending_quantity'):
             member[field] += row[field]
@@ -242,12 +276,39 @@ def build_report(plan):
         if member['required_quantity'] != member['planned_quantity'] + member['excluded_quantity']+member['pending_quantity']:
             raise ValueError(f"Part Mark {member['title']}의 수량 검증 실패")
         member['status'] = '미확정 포함 수량 일치' if member['pending_quantity'] else '일치' if not member['excluded_quantity'] else '예외 포함 일치 · 제외 내역 확인'
+    group_summaries=[]
+    for partition in (GENERAL,BK):
+        sources=[r for r in reconciliation if r['cutting_group']==partition]
+        if not sources:continue
+        patterns=[p for p in plan['patterns'] if p.get('cutting_group',GENERAL)==partition]
+        orders=[o for o in plan['orders'] if o.get('cutting_group',GENERAL)==partition]
+        stock=sum(units(p['stock_length'])*p['bar_count'] for p in patterns)
+        combined=sum(units(p['parts_length'])*p['bar_count'] for p in patterns)
+        remnant=sum(units(p['remnant'])*p['bar_count'] for p in patterns)
+        finished=sum(units(i['length'])*r['planned_quantity'] for i,r in zip(plan['bom'],reconciliation) if r['cutting_group']==partition)
+        group_summaries.append({'cutting_group':partition,'label':GROUP_LABELS[partition],
+            'required_quantity':sum(r['required_quantity'] for r in sources),
+            'confirmed_quantity':sum(r['planned_quantity'] for r in sources),
+            'pending_quantity':sum(r['pending_quantity'] for r in sources),
+            'excluded_quantity':sum(r['excluded_quantity'] for r in sources),
+            'bar_count':sum(o['quantity'] for o in orders),
+            'new_stock_length':sum(o['total_length'] for o in orders),
+            'combined_length':combined/1000,'remnant':remnant/1000,
+            'loss_rate':rounded(100*Fraction(stock-finished,stock),2) if stock else 0})
+    if sum(r['required_quantity'] for r in group_summaries)!=sum(i['quantity'] for i in plan['bom']):
+        raise ValueError('BK 분리 전후 원본 BOM 수량 검증 실패')
+    ordered_groups=sorted(groups.values(),key=lambda g:(group_order(g['cutting_group']),g['material'],g['spec'])) if has_bk else list(groups.values())
+    partition_reports={partition:{'material_rows':rs,'material_display_rows':[display_row(r) for r in rs],
+        'combination_groups':[g for g in ordered_groups if g['cutting_group']==partition]}
+        for partition,rs in material_partitions.items()}
     return {'material_columns': [{'key': k, 'label': label} for k, label in MATERIAL_COLUMNS],
             'combination_columns': [{'key': k, 'label': label} for k, label in COMBINATION_COLUMNS],
             'material_layout': report_layout(MATERIAL_WIDTHS),
             'combination_layout': report_layout(COMBINATION_WIDTHS),
             'material_rows': rows, 'material_display_rows': display_rows,
-            'combination_groups': list(groups.values()), 'excluded': excluded, 'reconciliation': reconciliation,
+            'combination_groups':ordered_groups, 'excluded': excluded, 'reconciliation': reconciliation,
+            'has_bk':has_bk,'cutting_group_summaries':group_summaries,
+            'partition_reports':partition_reports,
             'weight_basis': basis, 'output_piece_count': produced, 'quantity_verified': True,
             'member_quantity_verified': True,
             'import_exclusions': plan.get('import_audit', {}).get('exclusions', []),

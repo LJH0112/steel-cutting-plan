@@ -116,7 +116,8 @@ async function loadPreview() {
   state.importAudit = data.import_audit || null;
   renderImportExclusions('import-preview', 'import-preview-body', 'import-preview-summary', state.importAudit);
   const count = data.items.reduce((sum, item) => sum + item.quantity, 0);
-  $('bom-count').textContent = `${fmt(data.items.length)}행 · ${fmt(count)}개`;
+  const bkCount=data.items.filter(i=>i.cutting_group==='BK').reduce((sum,i)=>sum+i.quantity,0);
+  $('bom-count').textContent = `${fmt(data.items.length)}행 · ${fmt(count)}개`+(bkCount ? ` · BK ${fmt(bkCount)}개 / 일반 ${fmt(count-bkCount)}개` : '');
   $('bom-body').innerHTML = data.items.slice(0, 100).map((item, index) => `<tr><td>${item.source_row || index + 1}</td><td>${esc(item.title)}</td><td>${esc(item.material)}</td><td>${esc(item.spec)}</td><td class="numeric">${fmt(item.length)}</td><td class="numeric">${fmt(item.quantity)}</td></tr>`).join('');
   $('bom-more').textContent = `${data.items.length > 100 ? '화면에는 첫 100행을 표시합니다. ' : ''}빈 행 및 합계 행을 제외했습니다. ${data.skipped_rows?.map(r => `${r.row}행: ${r.reason}`).join(' / ') || ''} 길이 단위: mm`;
   $('bom-section').hidden = false;
@@ -230,14 +231,15 @@ function renderResult() {
   metric('metric-pieces', s.piece_count, '개');
   $('metric-groups').textContent = `${s.group_count}개 재질·규격 그룹`;
   $('metric-time').textContent = `${s.elapsed_seconds}초 소요 · 수량 검증 완료`;
-  $('orders-count').textContent = result.orders.length;
-  $('patterns-count').textContent = result.patterns.length;
+  $('orders-count').textContent = result.orders.filter(o=>(o.cutting_group || 'GENERAL')==='GENERAL').length;
+  $('patterns-count').textContent = result.patterns.filter(p=>(p.cutting_group || 'GENERAL')==='GENERAL').length;
+  $('bk-orders-count').textContent = result.orders.filter(o=>o.cutting_group==='BK').length;
+  $('bk-patterns-count').textContent = result.patterns.filter(p=>p.cutting_group==='BK').length;
   $('physical-count').textContent = `제작 절편 ${fmt(report.output_piece_count)}개`;
   applyReportLayout($('orders-table'), report.material_layout);
   $('orders-head').innerHTML = '<tr>' + report.material_columns.map(c => `<th>${esc(c.label)}</th>`).join('') + '</tr>';
-  $('orders-body').innerHTML = report.material_display_rows.map(row => `<tr class="${row.kind}">${report.material_columns.map(c => fixedCellHTML(row[c.key], c.key)).join('')}</tr>`).join('');
-  $('patterns-list').innerHTML = report.combination_groups.map(group => combinationGroupHTML(group, report.combination_columns)).join('');
-  document.querySelectorAll('.combination-table').forEach(table => applyReportLayout(table, report.combination_layout));
+  $('bk-summary').hidden=!report.has_bk;
+  $('bk-summary-body').innerHTML=(report.cutting_group_summaries || []).map(r=>`<tr><td>${esc(r.label)}</td>${['bar_count','new_stock_length','combined_length','remnant','loss_rate','required_quantity','confirmed_quantity','pending_quantity'].map(k=>`<td class="numeric">${fmt(r[k])}</td>`).join('')}</tr>`).join('');
   renderSplices(result);
   renderManufacturing(result);
   const meta = result.report_metadata || {};
@@ -254,7 +256,7 @@ function renderResult() {
   $('excluded-body').innerHTML = issueRows(result.excluded);
   renderImportExclusions('import-results', 'import-results-body', 'import-results-summary', result.import_audit);
   if (s.total_splice_allowance) $('result-settings').textContent += ` · 이음 여유 합계 ${fmt(s.total_splice_allowance)}mm · 이음 여유 포함 순 로스율 ${fmt(s.net_loss_rate)}%`;
-  selectTab('orders');
+  selectTab(report.has_bk ? 'bk-patterns' : 'patterns');
 }
 function reportCell(value) {
   return value === null || value === undefined ? '' : typeof value === 'number' ? fmt(value) : esc(value);
@@ -273,10 +275,11 @@ function applyReportLayout(table, layout) {
   table.querySelector('colgroup')?.remove();
   table.insertAdjacentHTML('afterbegin', html);
 }
-function combinationGroupHTML(group, columns) {
+function combinationGroupHTML(group, columns, hasBK = false) {
   const inventory=group.patterns.filter(p=>p.inventory_id).map(p=>`${p.number}=${p.inventory_id}`).join(' / ');
   const approved=group.patterns.filter(p=>p.approval_id).map(p=>p.number).join(', ');
-  const heading = `[재질] ${esc(group.material)}　 [규격] ${esc(group.spec)}　 [단위중량]`+(inventory ? `　 [재고 패턴] ${esc(inventory)}` : '')+(approved ? `　 [승인 패턴] ${approved}` : '');
+  const partition=group.cutting_group==='BK' ? '[BK 전용 구역] ' : hasBK ? '[거더·일반 부재] ' : '';
+  const heading = partition+`[재질] ${esc(group.material)}　 [규격] ${esc(group.spec)}　 [단위중량]`+(inventory ? `　 [재고 패턴] ${esc(inventory)}` : '')+(approved ? `　 [승인 패턴] ${approved}` : '')+(group.pending_quantity ? `　 [미확정] ${fmt(group.pending_quantity)}개` : '');
   const bodies = group.patterns.map(pattern => {
     const rows = pattern.rows.map((row, index) => {
       const common = index ? '' : columns.slice(0, 6).map(c => fixedCellHTML(pattern[c.key], c.key, `rowspan="${pattern.rows.length}"`)).join('');
@@ -285,7 +288,7 @@ function combinationGroupHTML(group, columns) {
     }).join('');
     return `<tbody class="pattern-rows" data-pattern="${esc(pattern.id)}">${rows}</tbody>`;
   }).join('');
-  return `<section class="combo-group"><h3>${heading}</h3><div class="table-scroll"><table class="report-table fixed-report combination-table"><thead><tr>${columns.map(c => `<th>${esc(c.label)}</th>`).join('')}</tr></thead>${bodies}<tfoot><tr class="grand_total">${columns.map(c => fixedCellHTML(group.total[c.key], c.key)).join('')}</tr></tfoot></table></div></section>`;
+  return `<section class="combo-group" data-cutting-group="${group.cutting_group || 'GENERAL'}"><h3>${heading}</h3><div class="table-scroll"><table class="report-table fixed-report combination-table"><thead><tr>${columns.map(c => `<th>${esc(c.label)}</th>`).join('')}</tr></thead>${bodies}<tfoot><tr class="grand_total">${columns.map(c => fixedCellHTML(group.total[c.key], c.key)).join('')}</tr></tfoot></table></div></section>`;
 }
 function renderSplices(result) {
   const assemblies = result.splices || [];
@@ -297,24 +300,35 @@ function renderSplices(result) {
   $('splice-results').innerHTML = `<h3>이음 제작 검토 · ${esc(status)}</h3><div class="table-scroll"><table class="report-table"><thead><tr><th>원본 행</th><th>부재 번호</th><th>규격</th><th>완성 길이</th><th>수량</th><th>본재 길이</th><th>연결재 길이</th><th>통재 본수/부재</th><th>이음 수/부재</th><th>상태</th></tr></thead><tbody>${assemblies.map(a => `<tr><td>${a.row || ''}</td><td>${esc(a.title)}</td><td>${esc(a.spec)}</td><td>${fmt(a.finished_length)}</td><td>${a.quantity}</td><td>${fmt(a.base_length)}</td><td>${fmt(a.connector_length)}</td><td>${a.whole_bars_per_part}</td><td>${a.joint_count}</td><td>${esc(a.status)}</td></tr>`).join('')}</tbody></table></div>`;
 }
 function selectTab(name) {
-  for (const tab of ['orders', 'patterns']) {
+  for (const tab of ['bk-patterns','bk-orders','patterns','orders']) {
     $(`tab-${tab}`).classList.toggle('active', tab === name);
     $(`tab-${tab}`).setAttribute('aria-selected', String(tab === name));
-    $(`${tab}-view`).hidden = tab !== name;
   }
+  const materials=name.endsWith('orders'),partition=name.startsWith('bk-')?'BK':'GENERAL';
+  $('orders-view').hidden=!materials;$('patterns-view').hidden=materials;
+  $('orders-view').setAttribute('aria-labelledby',materials?`tab-${name}`:'tab-orders');
+  $('patterns-view').setAttribute('aria-labelledby',materials?'tab-patterns':`tab-${name}`);
+  if (!state.result)return;
+  const report=state.result.report,view=report.partition_reports[partition],label=partition==='BK'?'BK':'거더';
+  $('orders-body').innerHTML=view.material_display_rows.map(row=>`<tr class="${row.kind}" data-cutting-group="${partition}">${report.material_columns.map(c=>fixedCellHTML(row[c.key],c.key)).join('')}</tr>`).join('');
+  $('patterns-list').innerHTML=view.combination_groups.map(group=>combinationGroupHTML(group,report.combination_columns,report.has_bk)).join('') || `<p class="table-foot">${label} 확정 절단 조합이 없습니다. 미확정 수량은 위 목록에서 확인하세요.</p>`;
+  document.querySelectorAll('.combination-table').forEach(table=>applyReportLayout(table,report.combination_layout));
+  $('materials-project-header').querySelector('h2').textContent=`${label} 원자재 · 원자재 물량 집계표`;
+  $('combinations-project-header').querySelector('h2').textContent=`${label} 조합 · 조합 리스트`;
 }
-['orders', 'patterns'].forEach(name => $(`tab-${name}`).addEventListener('click', () => selectTab(name)));
+['bk-patterns','bk-orders','patterns','orders'].forEach(name=>$(`tab-${name}`).addEventListener('click',()=>selectTab(name)));
 document.querySelectorAll('[data-format]').forEach(button => button.addEventListener('click', async () => {
   if (!state.result || state.working) return;
   clearError();
-  const format = button.dataset.format;
-  busy(true, `${format === 'pdf' ? 'PDF' : '엑셀'} 파일을 준비하고 있습니다`);
+  const section=$('pdf-section').value;
+  const format=button.dataset.format==='pdf' && section==='four'?'pdfzip':button.dataset.format;
+  busy(true, `${format === 'pdfzip' ? 'PDF 4개' : format==='pdf'?'PDF':'엑셀'} 파일을 준비하고 있습니다`);
   try {
-    const response = await fetch(`/api/results/${state.result.job_id}.${format}?paper_size=${$('paper-size').value}&orientation=${$('paper-orientation').value}&section=${$('pdf-section').value}`);
+    const response = await fetch(`/api/results/${state.result.job_id}.${format}?paper_size=${$('paper-size').value}&orientation=${$('paper-orientation').value}&section=${section==='four'?'all':section}`);
     if (!response.ok) throw new Error(await responseError(response));
     const url = URL.createObjectURL(await response.blob());
     const link = document.createElement('a');
-    link.href = url; link.download = format === 'pdf' && $('pdf-section').value !== 'all' ? `CP_${$('pdf-section').value}.pdf` : `steel_cutting_plan.${format}`;
+    link.href=url;link.download=format==='pdfzip'?'STEELPLAN_PDF_4개.zip':format==='pdf' && section!=='all'?`CP_${section}.pdf`:`steel_cutting_plan.${format}`;
     document.body.append(link); link.click(); link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 30000);
   } catch (e) { error(e.message); }
@@ -340,13 +354,14 @@ function manufacturingControls() {
     spec:row.querySelector('[data-inventory="spec"]').value,
     length:row.querySelector('[data-inventory="length"]').value,
     quantity:Number(row.querySelector('[data-inventory="quantity"]').value),
+    cutting_group:row.querySelector('[data-inventory="cutting_group"]').value,
     confirmed:row.querySelector('[data-inventory="confirmed"]').checked
   }));
   return {remnant_inventory,transport_max_length:$('transport-max').value || null,processing_max_length:$('processing-max').value || null};
 }
 $('add-inventory').addEventListener('click',()=>{
   const tr=document.createElement('tr');
-  tr.innerHTML=['id','material','spec','length','quantity'].map(key=>`<td><input data-inventory="${key}" aria-label="잔재 ${key}" type="${['length','quantity'].includes(key)?'number':'text'}" ${key==='quantity'?'min="1" step="1"':'step="0.001"'}></td>`).join('')+'<td><input data-inventory="confirmed" aria-label="실제 재고 확인" type="checkbox"></td><td><button type="button" class="text-button">삭제</button></td>';
+  tr.innerHTML=['id','material','spec','length','quantity'].map(key=>`<td><input data-inventory="${key}" aria-label="잔재 ${key}" type="${['length','quantity'].includes(key)?'number':'text'}" ${key==='quantity'?'min="1" step="1"':'step="0.001"'}></td>`).join('')+'<td><select data-inventory="cutting_group" aria-label="잔재 절단 그룹"><option value="GENERAL">일반 부재</option><option value="BK">BK 전용</option></select></td><td><input data-inventory="confirmed" aria-label="실제 재고 확인" type="checkbox"></td><td><button type="button" class="text-button">삭제</button></td>';
   tr.querySelector('button').addEventListener('click',()=>{tr.remove();revalidate();});
   tr.addEventListener('change',revalidate);$('inventory-body').append(tr);
   clearResults();state.approvedCandidates.clear();state.validationVersion++;state.validationPending=true;

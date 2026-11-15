@@ -15,6 +15,7 @@ from decimal import Decimal
 from .materials import classify_material, TS_BOM_MATERIAL_TYPES
 from .models import BOMItem
 from .optimizer import optimize, units, mm, MIN_REMAINDER
+from .member_groups import member_group, GENERAL
 
 _CACHE = OrderedDict()
 _LOCK = threading.Lock()
@@ -52,6 +53,7 @@ def _solve(request, items, lengths, *, inventory=(), relaxed=False, objective='t
 
 def _row(item,index):
     return {'input_index':index,'row':item.source_row or index+1,'title':item.title,
+            'cutting_group':member_group(item),
             'assembly_mark':item.assembly_mark,'material':item.material,'spec':item.spec,
             'length':float(item.length),'quantity':item.quantity,'material_type':classify_material(item.spec)}
 
@@ -66,7 +68,7 @@ def _allocations(pattern, remaining, items):
     for cut in pattern['cuts']:
         needed=cut['quantity']*pattern['bar_count']
         for i,item in enumerate(items):
-            if (item.material,item.spec,units(item.length))!=(pattern['material'],pattern['spec'],units(cut['length'])):
+            if (member_group(item),item.material,item.spec,units(item.length))!=(pattern.get('cutting_group',GENERAL),pattern['material'],pattern['spec'],units(cut['length'])):
                 continue
             take=min(needed,remaining[i])
             if take:
@@ -143,12 +145,13 @@ def proposals(request, settings):
             'reason':'절단날 손실 반영 후 잔재 0~30mm · 해당 절단 패턴 승인 필요',
             'stock_length':pattern['stock_length'],'remnant':pattern['remnant'],
             'material':pattern['material'],'spec':pattern['spec']})
+        candidates[-1]['cutting_group']=pattern.get('cutting_group',GENERAL)
     for n,item in enumerate(items):
         if not _scope(item):continue
         shorter=[s for s in lengths.get(classify_material(item.spec),[]) if 0<item.length-s<=100]
         if not shorter:continue
         base=max(shorter);connector=item.length-base+request.splice_allowance
-        matches=[r for r in request.remnant_inventory if (r.material,r.spec)==(item.material,item.spec)
+        matches=[r for r in request.remnant_inventory if (r.cutting_group,r.material,r.spec)==(member_group(item),item.material,item.spec)
                  and r.length>=request.reusable_remnant_min and units(r.length)>=units(connector)+kerf+MIN_REMAINDER
                  and (request.processing_max_length is None or r.length<=request.processing_max_length)]
         # Offer one verified and one unverified alternative; never invent stock.
@@ -206,9 +209,9 @@ def _summarize(plan, request, confirmed, joint_allowance=0):
             for field,value in [('input_length',stock),('used_length',parts+loss),('remnant',remnant)]:
                 inventory_totals[p['inventory_id']][field]+=value*q
             continue
-        key=p['material'],p['spec'],p['stock_length']
-        order=orders.setdefault(key,{'material':key[0],'spec':key[1],'stock_length':key[2],
-            'material_type':classify_material(key[1]),'quantity':0,'total_length':0,'parts_length':0,'kerf_loss':0,'remnant':0})
+        key=p.get('cutting_group',GENERAL),p['material'],p['spec'],p['stock_length']
+        order=orders.setdefault(key,{'cutting_group':key[0],'material':key[1],'spec':key[2],'stock_length':key[3],
+            'material_type':classify_material(key[2]),'quantity':0,'total_length':0,'parts_length':0,'kerf_loss':0,'remnant':0})
         order['quantity']+=q
         for field,value in [('total_length',stock),('parts_length',parts),('kerf_loss',loss),('remnant',remnant)]:order[field]+=value*q
     for o in orders.values():
@@ -217,10 +220,12 @@ def _summarize(plan, request, confirmed, joint_allowance=0):
     stock_by_id={r.id:r for r in _inventory(request)}
     if any(k not in stock_by_id or q>stock_by_id[k].quantity for k,q in used_inventory.items()):
         raise RuntimeError('확인 재고 초과 또는 미확인 재고 사용')
+    if any(p.get('inventory_id') and stock_by_id[p['inventory_id']].cutting_group!=p.get('cutting_group',GENERAL) for p in plan['patterns']):
+        raise RuntimeError('BK와 일반 부재의 재고 절단 그룹이 혼합되었습니다.')
     finished=sum(units(i.length)*confirmed[n] for n,i in enumerate(request.items))
     if totals['parts']-joint_allowance!=finished:raise RuntimeError('완성 길이·이음 여유 검증 실패')
     s=plan['summary'];s.update(bar_count=sum(o['quantity'] for o in orders.values()),piece_count=sum(confirmed.values()),
-        group_count=len({(p['material'],p['spec']) for p in plan['patterns']}),
+        group_count=len({(p.get('cutting_group',GENERAL),p['material'],p['spec']) for p in plan['patterns']}),
         input_piece_count=sum(i.quantity for i in request.items),pending_piece_count=sum(i.quantity for i in request.items)-sum(confirmed.values()),
         excluded_piece_count=0,excluded_rows=0,total_stock_length=mm(totals['stock']),
         total_new_stock_length=mm(totals['stock']-totals['inventory']),inventory_input_length=mm(totals['inventory']),
@@ -234,7 +239,7 @@ def _summarize(plan, request, confirmed, joint_allowance=0):
     plan['inventory_usage']=[{'id':key,'material':stock_by_id[key].material,'spec':stock_by_id[key].spec,
         'length':float(stock_by_id[key].length),'used_quantity':q,'remaining_quantity':stock_by_id[key].quantity-q,
         **{field:mm(value) for field,value in inventory_totals[key].items()},
-        'confirmed':True} for key,q in used_inventory.items()]
+        'cutting_group':stock_by_id[key].cutting_group,'confirmed':True} for key,q in used_inventory.items()]
 
 
 def _comparison(label,plan,quantity,total):
@@ -274,6 +279,7 @@ def plan_manufacturing(request, settings):
             cut_bom.append({**item.model_dump(mode='json'),'length':str(c['base_length']),'quantity':q,'weight':'',
                             'role':'본재','assembly_length':float(item.length)})
             locked.append({'material':item.material,'spec':item.spec,'material_type':classify_material(item.spec),
+                'cutting_group':member_group(item),
                 'stock_length':c['base_length'],'bar_count':q,'cuts':[{'length':c['base_length'],'quantity':1}],
                 'uncut':True,'stock_source':'new','approval_id':key})
             components[i]+=2*q

@@ -57,7 +57,7 @@ class FixedCell(Flowable):
             baseline -= leading
 
 
-def render_pdf(plan, report, summary, notes, paper_size, orientation, section):
+def render_pdf(plan, report, summary, notes, paper_size, orientation, section, *, include_audit=True, include_pending=False):
     if orientation not in ('portrait', 'landscape') or section not in ('all', 'materials', 'combinations'):
         raise ValueError('인쇄 방향 또는 PDF 구역이 올바르지 않습니다.')
     size = A3 if paper_size == 'A3' else A4
@@ -90,7 +90,9 @@ def render_pdf(plan, report, summary, notes, paper_size, orientation, section):
             if group:
                 sources=' / '.join(f"{p['number']}={p['inventory_id']}" for p in group['patterns'] if p.get('inventory_id'))
                 approved=', '.join(str(p['number']) for p in group['patterns'] if p.get('approval_id'))
-                draw_fitted(can,f"[재질] {group['material']}    [규격] {group['spec']}    [단위중량]"+('    [재고 패턴] '+sources if sources else '')+('    [승인 패턴] '+approved if approved else ''),margin,height-101,content_width)
+                partition='[BK 전용 구역] ' if group.get('cutting_group')=='BK' else '[일반 부재] ' if report.get('has_bk') else ''
+                pending=f"    [미확정] {group['pending_quantity']}개" if group.get('pending_quantity') else ''
+                draw_fitted(can,partition+f"[재질] {group['material']}    [규격] {group['spec']}    [단위중량]"+('    [재고 패턴] '+sources if sources else '')+('    [승인 패턴] '+approved if approved else '')+pending,margin,height-101,content_width)
             can.restoreState()
         return draw
     class NumberedCanvas(canvas.Canvas):
@@ -137,8 +139,12 @@ def render_pdf(plan, report, summary, notes, paper_size, orientation, section):
         start_page('materials','원자재 물량 집계표')
         rows=[[r[k]for k,_ in MATERIAL_COLUMNS]for r in report['material_display_rows']]
         total_rows=[i for i,r in enumerate(report['material_display_rows'],1)if r['kind']!='detail']
-        story += [table([label for _,label in MATERIAL_COLUMNS],rows,MATERIAL_WIDTHS,comma=True,totals=total_rows),Spacer(1,8),p(summary)]
+        section_spans=[('SPAN',(0,i),(9,i)) for i,r in enumerate(report['material_display_rows'],1) if r['kind']=='section_header']
+        story += [table([label for _,label in MATERIAL_COLUMNS],rows,MATERIAL_WIDTHS,comma=True,totals=total_rows,spans=section_spans),Spacer(1,8),p(summary)]
     if section in ('all','combinations'):
+        if not report['combination_groups']:
+            start_page('empty-combinations','조합 리스트')
+            story += [p('해당 구역의 확정 절단 조합이 없습니다.'),Spacer(1,8),p(summary)]
         for gi,group in enumerate(report['combination_groups']):
             start_page(f'combination-{gi}','조합 리스트',group)
             rows=[];spans=[];ends=[]
@@ -161,8 +167,20 @@ def render_pdf(plan, report, summary, notes, paper_size, orientation, section):
                 ends.append(end)
             rows.append([group['total'][k]for k,_ in COMBINATION_COLUMNS])
             story.append(table([label for _,label in COMBINATION_COLUMNS],rows,COMBINATION_WIDTHS,spans=spans,ends=ends,totals=[len(rows)]))
+    if report['has_bk']:
+        start_page('bk-summary','일반 · BK 분리 집계')
+        story += [p('Part Mark의 BK/WBK/FBK 부재를 분리했습니다. 재질·규격이 같아도 일반 부재와 같은 원자재에 조합하지 않으며 원본 식별자와 수량은 보존합니다.'),Spacer(1,8),
+            table(['구분','발주 본수','신규 총길이','조합길이','잔철','로스율 %','필요 수량','확정 수량','미확정'],
+                [[r[k]for k in ('label','bar_count','new_stock_length','combined_length','remnant','loss_rate','required_quantity','confirmed_quantity','pending_quantity')]
+                 for r in report['cutting_group_summaries']], [80,45,70,70,65,45,45,45,45])]
+    if include_pending and plan.get('pending'):
+        start_page('partition-pending','제작·발주 미확정')
+        story += [p('이 구역의 원본 수량을 보존했습니다. 아래 수량은 확정 원자재 발주와 절단 조합에 포함되지 않습니다.'),Spacer(1,8),
+            table(['행','Ass Mark','Part Mark','재질','규격','길이','수량','사유'],
+                [[r[k] for k in ('row','assembly_mark','title','material','spec','length','quantity','reason')] for r in plan['pending']],
+                [30,45,55,45,90,50,35,140])]
     # Approval and validation details use their own section, keeping the reference forms uncluttered.
-    if plan.get('splices') or plan.get('manufacturing') or report['excluded'] or report.get('import_exclusions') or section=='all':
+    if include_audit and (plan.get('splices') or plan.get('manufacturing') or report['excluded'] or report.get('import_exclusions') or section=='all'):
         start_page('validation','수량 검증 · 이음 승인 대상')
         story += [p(summary,heading),p(notes),Spacer(1,8)]
         if plan.get('splices'):
